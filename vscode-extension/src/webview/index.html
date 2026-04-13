@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="style.css">
+  <title>Local tab agent</title>
+</head>
+<body>
+  <div id="app">
+    <div id="status-bar">
+      <span id="status-indicator" class="status-idle"></span>
+      <span id="status-text">IDLE</span>
+      <button id="btn-check-status" class="icon-btn" title="Check connections">⟳</button>
+    </div>
+
+    <div id="connection-info" class="hidden">
+      <span id="ollama-status">Ollama: --</span>
+      <span id="bridge-status">Bridge: --</span>
+    </div>
+
+    <div id="context-section" class="collapsible hidden">
+      <button class="collapsible-toggle" id="ctx-toggle">▶ Context Files</button>
+      <div class="collapsible-content hidden" id="ctx-content">
+        <ul id="ctx-file-list"></ul>
+      </div>
+    </div>
+
+    <div id="messages-container">
+      <div id="messages"></div>
+    </div>
+
+    <div id="diff-panel" class="hidden">
+      <div id="diff-summary"></div>
+      <div id="diff-content"></div>
+      <div id="diff-actions">
+        <button id="btn-apply" class="btn btn-primary">Apply All</button>
+        <button id="btn-reject" class="btn btn-danger">Reject All</button>
+      </div>
+    </div>
+
+    <div id="input-area">
+      <textarea id="task-input" placeholder="Describe your task... (Ctrl+Enter to send)" rows="3"></textarea>
+      <button id="btn-send" class="btn btn-primary">Send</button>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

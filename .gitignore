@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# VS Code extension build output
+vscode-extension/dist/
+*.vsix
+*.zip
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / tooling
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Cursor / local (do not commit)
+.cursor/
+
+# Optional Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test / coverage
+coverage/
+.nyc_output/

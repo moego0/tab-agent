@@ -1,0 +1,155 @@
+{
+  "name": "local-tab-agent",
+  "displayName": "Local tab agent",
+  "description": "A local coding agent for VS Code with Ollama-powered repo analysis, ChatGPT browser tab bridging, and reviewable code changes.",
+  "version": "1.0.0",
+  "publisher": "moego0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/moego0/tab-agent.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Machine Learning", "Other"],
+  "keywords": [
+    "ai",
+    "agent",
+    "ollama",
+    "chatgpt",
+    "local llm",
+    "coding assistant",
+    "code generation",
+    "workspace agent",
+    "repo analysis",
+    "diff review"
+  ],
+  "icon": "media/icon-128.png",
+  "galleryBanner": {
+    "color": "#0B1220",
+    "theme": "dark"
+  },
+  "preview": true,
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiagent-sidebar",
+          "title": "Local tab agent",
+          "icon": "media/activitybar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiagent-sidebar": [
+        {
+          "type": "webview",
+          "id": "aiagent.chatView",
+          "name": "Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "aiagent.start",
+        "title": "Local tab agent: Open Sidebar"
+      },
+      {
+        "command": "aiagent.clearChat",
+        "title": "Local tab agent: Clear Chat"
+      },
+      {
+        "command": "aiagent.checkOllama",
+        "title": "Local tab agent: Check Ollama Connection"
+      },
+      {
+        "command": "aiagent.checkBridge",
+        "title": "Local tab agent: Check Chrome Bridge"
+      },
+      {
+        "command": "aiagent.openDiff",
+        "title": "Local tab agent: Open Diff for File"
+      },
+      {
+        "command": "aiagent.selectModel",
+        "title": "Local tab agent: Select Ollama Model"
+      },
+      {
+        "command": "aiagent.newChat",
+        "title": "Local tab agent: New Chat"
+      },
+      {
+        "command": "aiagent.clearHistory",
+        "title": "Local tab agent: Clear Chat History"
+      }
+    ],
+    "configuration": {
+      "title": "Local tab agent",
+      "properties": {
+        "aiagent.ollamaModel": {
+          "type": "string",
+          "default": "qwen2.5-coder:7b",
+          "description": "Ollama model to use for file selection and prompt engineering"
+        },
+        "aiagent.ollamaUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama HTTP API URL"
+        },
+        "aiagent.maxContextChars": {
+          "type": "number",
+          "default": 80000,
+          "description": "Maximum total characters of file content to send as context"
+        },
+        "aiagent.autoApplyChanges": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically apply changes without diff preview"
+        },
+        "aiagent.excludePatterns": {
+          "type": "array",
+          "default": [
+            "node_modules",
+            ".git",
+            "dist",
+            "build",
+            "__pycache__",
+            "*.lock",
+            "*.log",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.svg",
+            "*.ico",
+            "*.woff",
+            "*.ttf",
+            "*.bin"
+          ],
+          "description": "File and directory patterns to exclude from repo scanning"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "diff": "^5.2.0",
+    "ignore": "^5.3.0",
+    "ws": "^8.16.0"
+  }
+}
