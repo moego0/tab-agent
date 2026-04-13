@@ -274,22 +274,6 @@ body {
 }
 .welcome-title { margin-top: 12px; font-size: 15px; font-weight: 700; }
 .welcome-sub { font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1.5; margin-top: 6px; }
-.welcome-diagram-wrap {
-  width: 100%;
-  max-width: 100%;
-  margin-top: 12px;
-  padding: 0 4px;
-  box-sizing: border-box;
-}
-.welcome-diagram {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  height: auto;
-  border-radius: 8px;
-  border: 1px solid var(--vscode-panel-border);
-  object-fit: contain;
-}
 #welcome-connection { margin-top: 10px; display: flex; gap: 8px; }
 .conn-chip {
   display: inline-flex;

@@ -38,11 +38,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [
-        this.extensionUri,
         vscode.Uri.joinPath(this.extensionUri, 'src', 'webview'),
         vscode.Uri.joinPath(this.extensionUri, 'dist'),
-        vscode.Uri.joinPath(this.extensionUri, 'images'),
-        vscode.Uri.joinPath(this.extensionUri, 'media'),
       ],
     };
 
@@ -316,9 +313,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'src', 'webview', 'script.js')
     );
-    const workflowDiagramUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'diagram.png')
-    );
     const nonce = getNonce();
 
     return `<!DOCTYPE html>
@@ -327,7 +321,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} https: data:;">
+    content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
   <title>Local tab agent</title>
 </head>
@@ -425,9 +419,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       </div>
       <div class="welcome-title">Local tab agent</div>
       <div class="welcome-sub">Describe a task and the agent will analyze your repo,<br>select relevant files, and implement the changes.</div>
-      <div class="welcome-diagram-wrap">
-        <img class="welcome-diagram" src="${workflowDiagramUri}" alt="Workflow: user prompt, Tab agent, Ollama, LLM, file changes" />
-      </div>
       <div id="welcome-connection">
         <span id="welcome-ollama" class="conn-chip">⟳ Ollama</span>
         <span id="welcome-bridge" class="conn-chip">⟳ Bridge</span>

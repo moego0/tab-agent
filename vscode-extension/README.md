@@ -2,9 +2,7 @@
 
 **Local tab agent** is a local coding agent for VS Code. It uses **Ollama** for repository-aware planning and a **browser bridge** to **ChatGPT** for high-quality code generation, then lets you **review every change** before applying it.
 
-**Workflow diagram:** the same graphic is shown in the **Local tab agent** sidebar on the empty welcome screen.
-
-For the **Marketplace** and **GitHub** README preview, this image is loaded from the repo:
+**Workflow diagram** for docs and the Marketplace:
 
 ![Local tab agent workflow](https://raw.githubusercontent.com/moego0/tab-agent/main/vscode-extension/diagram.png)
 

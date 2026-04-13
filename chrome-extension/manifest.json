@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Local tab bridge",
   "short_name": "Tab bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Connects the Local tab agent VS Code extension to a live ChatGPT tab for prompt routing and response capture.",
   "permissions": [
     "activeTab",
