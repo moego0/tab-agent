@@ -37,6 +37,10 @@ Monorepo for **Local tab agent**: a VS Code coding assistant that uses **Ollama*
 
 ![Folder picker: select the chrome-extension folder and click Select Folder](chrome-extension/icons/step%203.png)
 
+#### Contribution
+
+Contributions are very welcome. The goal of this project is to turn your subscription to any LLM into a coding agent, helping users reduce API costs while still getting powerful AI-assisted development.
+It also works without a paid plan, but ChatGPT limits the available context.
 More detail: [`chrome-extension/README.md`](chrome-extension/README.md).
 
 ## License
