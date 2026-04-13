@@ -2,7 +2,7 @@
   "name": "local-tab-agent",
   "displayName": "Local tab agent",
   "description": "A local coding agent for VS Code with Ollama-powered repo analysis, ChatGPT browser tab bridging, and reviewable code changes.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "moego0",
   "license": "MIT",
   "repository": {
