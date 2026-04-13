@@ -2,6 +2,10 @@
 
 Monorepo for **Local tab agent**: a VS Code coding assistant that uses **Ollama** locally and **ChatGPT** in the browser via a Chrome bridge.
 
+### Workflow
+
+![Local tab agent workflow diagram](vscode-extension/diagram.png)
+
 | Part | Folder | Description |
 |------|--------|-------------|
 | VS Code extension | [`vscode-extension/`](vscode-extension/) | Sidebar agent, Ollama, WebSocket bridge, diffs |
