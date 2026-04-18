@@ -2,7 +2,7 @@
   "name": "local-tab-agent",
   "displayName": "Local tab agent",
   "description": "A local coding agent for VS Code with Ollama-powered repo analysis, ChatGPT browser tab bridging, and reviewable code changes.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "moego0",
   "license": "MIT",
   "repository": {
@@ -84,11 +84,61 @@
       {
         "command": "aiagent.clearHistory",
         "title": "Local tab agent: Clear Chat History"
+      },
+      {
+        "command": "aiagent.selectProvider",
+        "title": "Local tab agent: Select AI Provider"
+      },
+      {
+        "command": "aiagent.createRulesFile",
+        "title": "Local tab agent: Create .agent-rules File"
       }
     ],
     "configuration": {
       "title": "Local tab agent",
       "properties": {
+        "aiagent.aiProvider": {
+          "type": "string",
+          "enum": ["chatgpt", "gemini", "claude"],
+          "enumDescriptions": [
+            "Use ChatGPT (chatgpt.com) — requires open ChatGPT tab",
+            "Use Gemini (gemini.google.com) — requires open Gemini tab",
+            "Use Claude (claude.ai) — requires open Claude tab"
+          ],
+          "default": "chatgpt",
+          "description": "Which AI provider the Chrome bridge should use"
+        },
+        "aiagent.responseTimeoutMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "How long to wait for an AI response before timing out (minutes). File uploads use double this value."
+        },
+        "aiagent.allowTerminalCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow <<<RUN:>>> commands from the AI to execute in the workspace (you will be prompted to confirm each command unless this is true)"
+        },
+        "aiagent.skipOllamaIfFilesMentioned": {
+          "type": "boolean",
+          "default": true,
+          "description": "When @file mentions are present, skip Ollama file selection and use mentioned files only"
+        },
+        "aiagent.conversationContextTurns": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 20,
+          "description": "Number of recent user/assistant turns to include in the prompt as conversation history"
+        },
+        "aiagent.maxStoredSessions": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum chat sessions to keep in history"
+        },
         "aiagent.ollamaModel": {
           "type": "string",
           "default": "qwen2.5-coder:7b",

@@ -19,6 +19,7 @@ import {
   startNewSession,
   ChatSession,
 } from './agent';
+import { refreshBridgeStatusBar } from './bridgeServer';
 import { openNativeDiff } from './diffViewer';
 import { getWorkspaceRoot } from './fileTools';
 
@@ -45,20 +46,40 @@ export function activate(context: vscode.ExtensionContext): void {
     )
   );
 
+  const CHROME_BRIDGE_SETUP_URL =
+    'https://github.com/moego0/tab-agent/tree/main/chrome-extension';
+
+  const isFirstOpen = !context.globalState.get<boolean>('aiagent.hasOpened', false);
+  if (isFirstOpen) {
+    void context.globalState.update('aiagent.hasOpened', true);
+    void context.globalState.update('aiagent.pendingOnboarding', true);
+
+    void vscode.window
+      .showInformationMessage(
+        'Local tab agent needs the Chrome extension "Local tab bridge" to connect VS Code to ChatGPT, Gemini, or Claude in your browser. Install it once — the agent sidebar also shows a setup banner.',
+        'Open setup guide',
+        'Open agent sidebar'
+      )
+      .then((choice) => {
+        if (choice === 'Open setup guide') {
+          void vscode.env.openExternal(vscode.Uri.parse(CHROME_BRIDGE_SETUP_URL));
+        } else if (choice === 'Open agent sidebar') {
+          void vscode.commands.executeCommand('aiagent.start');
+        }
+      });
+  }
+
   // Register session save callback — persists to globalState
-  const MAX_STORED_SESSIONS = 50;
   registerSessionSaveCallback((session: ChatSession) => {
+    const maxStored =
+      vscode.workspace.getConfiguration('aiagent').get<number>('maxStoredSessions', 50) ?? 50;
     const sessions: ChatSession[] = context.globalState.get<ChatSession[]>(
       'aiagent.chatSessions',
       []
     );
-    const idx = sessions.findIndex((s) => s.id === session.id);
-    if (idx >= 0) {
-      sessions[idx] = session;
-    } else {
-      sessions.unshift(session);
-    }
-    const trimmed = sessions.slice(0, MAX_STORED_SESSIONS);
+    const without = sessions.filter((s) => s.id !== session.id);
+    without.unshift(session);
+    const trimmed = without.slice(0, Math.max(1, maxStored));
     context.globalState.update('aiagent.chatSessions', trimmed);
 
     sidebarProvider.postMessage({
@@ -110,6 +131,68 @@ export function activate(context: vscode.ExtensionContext): void {
         sidebarProvider.postMessage({ type: 'historyUpdated', data: [] });
         vscode.window.showInformationMessage('Local tab agent: chat history cleared.');
       }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aiagent.selectProvider', async () => {
+      const items: vscode.QuickPickItem[] = [
+        {
+          label: 'ChatGPT',
+          description: 'chatgpt.com',
+        },
+        {
+          label: 'Gemini',
+          description: 'gemini.google.com',
+        },
+        {
+          label: 'Claude',
+          description: 'claude.ai',
+        },
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        title: 'Select AI provider',
+        placeHolder: 'Which browser tab should the bridge use?',
+      });
+      if (!picked) return;
+      const map: Record<string, 'chatgpt' | 'gemini' | 'claude'> = {
+        ChatGPT: 'chatgpt',
+        Gemini: 'gemini',
+        Claude: 'claude',
+      };
+      const value = map[picked.label];
+      if (!value) return;
+      await vscode.workspace
+        .getConfiguration('aiagent')
+        .update('aiProvider', value, vscode.ConfigurationTarget.Global);
+      refreshBridgeStatusBar();
+      sidebarProvider.postProviderUpdate(value);
+      vscode.window.showInformationMessage(`Local tab agent: provider set to ${picked.label}.`);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aiagent.createRulesFile', async () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        vscode.window.showErrorMessage('Open a workspace folder first.');
+        return;
+      }
+      const uri = vscode.Uri.joinPath(folder.uri, '.agent-rules');
+      try {
+        await vscode.workspace.fs.stat(uri);
+        await vscode.window.showTextDocument(uri);
+        return;
+      } catch {
+        // create
+      }
+      const template =
+        '# Local tab agent — project rules\n\n' +
+        '- Describe coding conventions, test commands, and constraints here.\n' +
+        '- This file is prepended to every AI prompt (max 4KB used).\n';
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(template, 'utf8'));
+      await vscode.window.showTextDocument(uri);
+      vscode.window.showInformationMessage('Created .agent-rules in the workspace root.');
     })
   );
 

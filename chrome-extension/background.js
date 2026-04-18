@@ -8,6 +8,7 @@ let reconnectTimer = null;
 let isConnected = false;
 let lastPrompt = { text: '', timestamp: 0 };
 let lastResponse = { text: '', timestamp: 0 };
+let lastProvider = 'chatgpt';
 
 // Pending state for push-based content→background response delivery (Bug 2 fix)
 let pendingResponseResolve = null;
@@ -59,8 +60,9 @@ function connect() {
     if (msg.type === 'PROMPT') {
       console.log('[Local tab bridge] Received prompt, length:', msg.payload.length);
       lastPrompt = { text: msg.payload, timestamp: Date.now() };
+      lastProvider = msg.provider || 'chatgpt';
       updateState();
-      await handlePrompt(msg.payload, null);
+      await handlePrompt(msg.payload, null, lastProvider);
     }
 
     if (msg.type === 'PROMPT_WITH_FILES') {
@@ -70,8 +72,9 @@ function connect() {
         msg.payload.length, 'chars'
       );
       lastPrompt = { text: msg.payload, timestamp: Date.now() };
+      lastProvider = msg.provider || 'chatgpt';
       updateState();
-      await handlePrompt(msg.payload, msg.files || []);
+      await handlePrompt(msg.payload, msg.files || [], lastProvider);
     }
   };
 
@@ -112,28 +115,39 @@ function sendToVSCode(msg) {
   }
 }
 
+function providerTabUrls(provider) {
+  if (provider === 'gemini') return ['https://gemini.google.com/*'];
+  if (provider === 'claude') return ['https://claude.ai/*'];
+  return ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
+}
+
+function defaultHomeUrl(provider) {
+  if (provider === 'gemini') return 'https://gemini.google.com/';
+  if (provider === 'claude') return 'https://claude.ai/';
+  return 'https://chatgpt.com/';
+}
+
 // files: array of {name, relativePath, base64, mimeType, sizeBytes} or null
-async function handlePrompt(promptText, files) {
-  let chatgptTab = null;
+async function handlePrompt(promptText, files, provider) {
+  const p = provider || 'chatgpt';
+  let targetTab = null;
 
   try {
-    const tabs = await chrome.tabs.query({
-      url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
-    });
+    const tabs = await chrome.tabs.query({ url: providerTabUrls(p) });
 
     if (tabs.length > 0) {
-      chatgptTab = tabs[0];
+      targetTab = tabs[0];
     } else {
-      chatgptTab = await chrome.tabs.create({ url: 'https://chatgpt.com/', active: true });
-      await waitForTabLoad(chatgptTab.id);
+      targetTab = await chrome.tabs.create({ url: defaultHomeUrl(p), active: true });
+      await waitForTabLoad(targetTab.id);
       await sleep(3000);
     }
 
-    await chrome.tabs.update(chatgptTab.id, { active: true });
+    await chrome.tabs.update(targetTab.id, { active: true });
 
-    await ensureContentScriptInjected(chatgptTab.id);
+    await ensureContentScriptInjected(targetTab.id);
 
-    const response = await sendPromptToContentScript(chatgptTab.id, promptText, files);
+    const response = await sendPromptToContentScript(targetTab.id, promptText, files, p);
 
     lastResponse = { text: response, timestamp: Date.now() };
     updateState();
@@ -187,7 +201,7 @@ async function ensureContentScriptInjected(tabId) {
     await sleep(1000);
   } catch (err) {
     console.error('[Local tab bridge] Failed to inject content script:', err);
-    throw new Error('Failed to inject content script into ChatGPT tab');
+    throw new Error('Failed to inject content script into AI tab');
   }
 }
 
@@ -195,7 +209,7 @@ async function ensureContentScriptInjected(tabId) {
 // chrome.runtime.sendMessage when ChatGPT finishes. This avoids Chrome's internal
 // short timeout on chrome.tabs.sendMessage callbacks that silently drops long replies.
 // files may be null (no uploads) or an array of FileAttachment objects
-function sendPromptToContentScript(tabId, promptText, files) {
+function sendPromptToContentScript(tabId, promptText, files, provider) {
   return new Promise((resolve, reject) => {
     pendingResponseResolve = resolve;
     pendingResponseReject = reject;
@@ -203,8 +217,8 @@ function sendPromptToContentScript(tabId, promptText, files) {
       pendingResponseResolve = null;
       pendingResponseReject = null;
       pendingResponseTimer = null;
-      reject(new Error('Content script did not respond within 5 minutes'));
-    }, 5 * 60 * 1000);
+      reject(new Error('Content script did not respond within 12 minutes'));
+    }, 12 * 60 * 1000);
 
     // Send HEARTBEAT every 5 s so VS Code knows Chrome is still alive while waiting
     heartbeatInterval = setInterval(() => {
@@ -212,9 +226,10 @@ function sendPromptToContentScript(tabId, promptText, files) {
     }, 5000);
 
     // Content script ACKs immediately; actual result arrives via chrome.runtime.sendMessage
-    const message = files && files.length > 0
-      ? { type: 'SEND_PROMPT_WITH_FILES', payload: promptText, files }
-      : { type: 'SEND_PROMPT', payload: promptText };
+    const message =
+      files && files.length > 0
+        ? { type: 'SEND_PROMPT_WITH_FILES', payload: promptText, files, provider }
+        : { type: 'SEND_PROMPT', payload: promptText, provider };
 
     chrome.tabs.sendMessage(tabId, message, () => {
       if (chrome.runtime.lastError) {
@@ -240,6 +255,7 @@ function sleep(ms) {
 function updateState() {
   chrome.storage.local.set({
     isConnected,
+    lastProvider,
     lastPrompt: {
       text: lastPrompt.text.slice(0, 60),
       timestamp: lastPrompt.timestamp

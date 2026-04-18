@@ -7,17 +7,16 @@ import { outputLog } from './bridgeServer';
 export interface FileSelectionResult {
   selected_files: string[];
   reasoning: string;
-  // Ollama's precise restatement of the task — used as input to the ChatGPT prompt
   refined_task: string;
 }
 
-// ─── Step 2: Ollama — file selector only, NEVER generates code ───────────────
-//
-// Ollama's ONLY jobs:
-//   1. Analyse the repo file tree and select which files are relevant
-//   2. Rewrite the user's task as a precise engineering requirement
-//
-// It does NOT write code, does NOT modify files.
+export interface PromptExtras {
+  historyContext?: string;
+  webContexts?: string[];
+  agentRules?: string;
+  conversationHistory?: string;
+}
+
 export async function selectFilesWithOllama(
   task: string,
   scanResult: RepoScanResult
@@ -92,21 +91,9 @@ Select the relevant files for this task. Respond in JSON only.`;
   }
 }
 
-// ─── Shared preamble rules ────────────────────────────────────────────────────
-//
-// IMPORTANT: Rule 4 deliberately REQUIRES a fenced code block inside each
-// <<<FILE:>>> block.  This is NOT optional.
-//
-// Why: ChatGPT renders its response as Markdown before our extension reads it
-// via `innerText`.  Any double-underscore sequence in raw text (e.g. Python
-// __init__, __name__, __main__) is consumed by the Markdown renderer as a bold
-// marker and the underscores are stripped from the DOM.  Wrapping the content
-// in a ``` fence forces ChatGPT to emit a <pre><code> block, which `innerText`
-// reads verbatim — underscores and all.
-//
-// The trimFileContent() function in responseParser.ts already strips the
-// opening and closing fence lines before the content is written to disk.
 const OUTPUT_RULES = `CRITICAL OUTPUT RULES — violating these will break the system:
+
+You are a code assistant. Respond ONLY using the structured format below. Do not add conversational text, preambles, or markdown outside the specified tags.
 
 1. Every file you create or modify MUST use this exact format:
      <<<FILE: relative/path/to/file>>>
@@ -136,14 +123,43 @@ const OUTPUT_RULES = `CRITICAL OUTPUT RULES — violating these will break the s
      [2-3 sentences describing what was created or changed and why]
      <<<END_SUMMARY>>>
 
-7. Write <<<MKDIR:>>> blocks BEFORE any <<<FILE:>>> blocks that go inside that directory.`;
+7. Write <<<MKDIR:>>> blocks BEFORE any <<<FILE:>>> blocks that go inside that directory.
 
-// ─── Step 3: Build ChatGPT prompt directly ───────────────────────────────────
+8. Optional terminal commands (after file blocks), executed in the workspace root after changes:
+     <<<RUN: npm test>>>
+     Only use safe, necessary commands (install, build, lint). Never use sudo or destructive commands.`;
+
+function buildExtrasSections(extras?: PromptExtras): string {
+  if (!extras) return '';
+  const parts: string[] = [];
+  if (extras.agentRules?.trim()) {
+    parts.push('=== PROJECT RULES (from .agent-rules) ===');
+    parts.push(extras.agentRules.trim());
+    parts.push('=== END RULES ===\n');
+  }
+  if (extras.conversationHistory?.trim()) {
+    parts.push('=== CONVERSATION HISTORY ===');
+    parts.push(extras.conversationHistory.trim());
+    parts.push('=== END HISTORY ===\n');
+  }
+  if (extras.historyContext?.trim()) {
+    parts.push('PREVIOUS TASKS COMPLETED IN THIS SESSION:');
+    parts.push(extras.historyContext.trim());
+    parts.push('');
+  }
+  if (extras.webContexts && extras.webContexts.length > 0) {
+    parts.push('=== WEB CONTEXT ===');
+    parts.push(...extras.webContexts);
+    parts.push('=== END WEB CONTEXT ===\n');
+  }
+  return parts.join('\n');
+}
+
 export async function buildChatGPTPrompt(
   refinedTask: string,
   fileTree: string,
   selectedFiles: string[],
-  historyContext?: string
+  extras?: PromptExtras
 ): Promise<string> {
   try {
     const maxChars = vscode.workspace
@@ -171,10 +187,6 @@ export async function buildChatGPTPrompt(
       .map((f) => `=== FILE: ${f.path} ===\n${f.content}\n=== END FILE ===`)
       .join('\n\n');
 
-    const historySection = historyContext
-      ? `\nPREVIOUS TASKS COMPLETED IN THIS SESSION:\n${historyContext}\n`
-      : '';
-
     const preamble = `You are acting as a senior software engineer inside a VS Code AI coding agent.
 You will receive a task and repository context. You must respond ONLY with structured file change blocks. No explanations before the blocks. No markdown prose. No conversational text.
 
@@ -183,7 +195,9 @@ ${OUTPUT_RULES}
 Here is the repository context and task:
 `;
 
-    const prompt = `${preamble}${historySection}
+    const extraBlock = buildExtrasSections(extras);
+
+    const prompt = `${preamble}${extraBlock}
 TASK:
 ${refinedTask}
 
@@ -193,30 +207,21 @@ ${fileTree}
 FILE CONTENTS (${fileContents.length} files, ${totalChars} chars):
 ${fileSection}`;
 
-    outputLog(`ChatGPT prompt assembled (${prompt.length} chars, ${fileContents.length} files)`);
+    outputLog(`AI prompt assembled (${prompt.length} chars, ${fileContents.length} files)`);
     return prompt;
   } catch (err) {
-    throw new Error(
-      `buildChatGPTPrompt failed: ${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new Error(`buildChatGPTPrompt failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-// Build a ChatGPT prompt for use when files are sent as real attachments.
 export async function buildChatGPTPromptForFileUpload(
   refinedTask: string,
   fileTree: string,
   attachedFiles: Array<{ name: string; relativePath: string }>,
-  historyContext?: string
+  extras?: PromptExtras
 ): Promise<string> {
   try {
-    const historySection = historyContext
-      ? `\nPREVIOUS TASKS COMPLETED IN THIS SESSION:\n${historyContext}\n`
-      : '';
-
-    const fileList = attachedFiles
-      .map((f) => `  - ${f.relativePath}`)
-      .join('\n');
+    const fileList = attachedFiles.map((f) => `  - ${f.relativePath}`).join('\n');
 
     const preamble = `You are acting as a senior software engineer inside a VS Code AI coding agent.
 The following files from the repository have been attached to this message.
@@ -230,7 +235,9 @@ ${OUTPUT_RULES}
 Here is the task:
 `;
 
-    const prompt = `${preamble}${historySection}
+    const extraBlock = buildExtrasSections(extras);
+
+    const prompt = `${preamble}${extraBlock}
 TASK:
 ${refinedTask}
 
@@ -238,8 +245,7 @@ REPOSITORY STRUCTURE:
 ${fileTree}`;
 
     outputLog(
-      `ChatGPT prompt (file-upload mode) assembled: ` +
-      `${prompt.length} chars, ${attachedFiles.length} files attached`
+      `AI prompt (file-upload mode) assembled: ` + `${prompt.length} chars, ${attachedFiles.length} files attached`
     );
     return prompt;
   } catch (err) {
@@ -249,7 +255,6 @@ ${fileTree}`;
   }
 }
 
-// Build a retry prompt when ChatGPT's first response had no <<<FILE:>>> blocks
 export function buildRetryPrompt(originalResponse: string): string {
   return `Your previous response did not use the required <<<FILE:>>> format.
 Please reformat your entire previous response using exactly this format:
@@ -268,23 +273,36 @@ ${originalResponse.slice(0, 8000)}`;
 }
 
 function extractJson<T>(text: string): T | null {
-  let cleaned = text.trim();
-  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenceMatch) {
-    cleaned = fenceMatch[1].trim();
+  // Try 1: Full JSON object extraction (expected case)
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      return JSON.parse(objMatch[0]) as T;
+    } catch {
+      /* fall through */
+    }
   }
 
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[0]);
-      } catch {
-        return null;
+  // Try 2: Ollama returned ONLY the array — wrap it into a valid response
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (arrMatch) {
+    try {
+      const files = JSON.parse(arrMatch[0]);
+      if (Array.isArray(files)) {
+        return { selected_files: files, reasoning: 'auto', refined_task: '' } as unknown as T;
       }
+    } catch {
+      /* fall through */
     }
-    return null;
   }
+
+  // Try 3: Strip markdown fences and retry
+  const stripped = text.replace(/```(?:json)?/g, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(stripped) as T;
+  } catch {
+    /* fall through */
+  }
+
+  return null;
 }

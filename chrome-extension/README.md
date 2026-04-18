@@ -1,6 +1,10 @@
 # Local tab bridge (Chrome)
 
-**Local tab bridge** connects your **[Local tab agent](../vscode-extension/)** VS Code extension to an active **ChatGPT** tab. It delivers prompts over a local WebSocket, injects them into ChatGPT, captures the assistant reply, and returns it to VS Code.
+**Version 1.0.3** (see `manifest.json`)
+
+**Local tab bridge** connects your **[Local tab agent](../vscode-extension/)** VS Code extension to an active **ChatGPT**, **Google Gemini**, or **Anthropic Claude** tab (whichever provider you selected in VS Code). It delivers prompts over a local WebSocket, injects them into the page, captures the assistant reply, and returns it to VS Code.
+
+When the VS Code agent sends **files**, the content script attaches them using **drag-and-drop** on the chat composer (with fallbacks). If attachment fails, the extension falls back to **inline** prompts so the task can still run.
 
 ## Install (step by step)
 
@@ -23,8 +27,8 @@
 
 ## Usage
 
-1. Start VS Code with **Local tab agent** (it opens the bridge on `localhost`).
-2. Open [ChatGPT](https://chatgpt.com) and sign in.
+1. Start VS Code with **Local tab agent** (it opens the bridge on `localhost`, default port **52000**).
+2. Open the site that matches your provider (**[ChatGPT](https://chatgpt.com)**, **[Gemini](https://gemini.google.com)**, or **[Claude](https://claude.ai)**) and sign in.
 3. Use the VS Code sidebar to run a task; the bridge must show **connected** in the popup.
 
 ## Icons
@@ -33,5 +37,5 @@ Toolbar icons are `icons/icon16.png` … `icon128.png`. To regenerate brand PNGs
 
 ## Troubleshooting
 
-- Console logs are prefixed with `[Local tab bridge]` / `[Local tab bridge content]`.
+- Console logs are prefixed with `[Local tab bridge]` / `[Local tab bridge content]` or **`[Tab bridge]`** in the page script for upload and send flows.
 - If injection fails after a ChatGPT UI update, update selectors in `content.js`.

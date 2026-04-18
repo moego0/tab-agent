@@ -30,6 +30,7 @@ export const FILE_LIMITS = {
     '.sql', '.graphql', '.proto',
     '.env', '.gitignore', '.dockerignore', 'dockerfile',
     '.cmake', 'makefile', '.gradle',
+    '.png', '.jpg', '.jpeg', '.webp', '.gif',
   ]),
 };
 
@@ -77,6 +78,11 @@ export function getMimeType(filePath: string): string {
     '.ps1': 'text/plain', '.bat': 'text/plain',
     '.sql': 'application/sql',
     '.csv': 'text/csv',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
   };
   return map[ext] ?? 'text/plain';
 }

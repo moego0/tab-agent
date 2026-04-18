@@ -2,18 +2,22 @@
   "manifest_version": 3,
   "name": "Local tab bridge",
   "short_name": "Tab bridge",
-  "version": "1.0.1",
-  "description": "Connects the Local tab agent VS Code extension to a live ChatGPT tab for prompt routing and response capture.",
+  "version": "1.0.3",
+  "description": "Connects the Local tab agent VS Code extension to ChatGPT, Gemini, or Claude in the browser for prompt routing and response capture.",
   "permissions": [
     "activeTab",
     "scripting",
     "tabs",
     "storage",
-    "alarms"
+    "alarms",
+    "clipboardRead",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -22,7 +26,9 @@
     {
       "matches": [
         "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

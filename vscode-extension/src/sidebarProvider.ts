@@ -1,21 +1,29 @@
 import * as vscode from 'vscode';
 import {
   registerCallbacks,
-  runPipeline,
+  queueTask,
   applyChanges,
   rejectChanges,
   clearChat,
   startNewSession,
   getAgentState,
   removePendingChange,
+  getEffectiveWriteContent,
+  setHunkAccepted,
+  registerQueueDepthCallback,
   AgentStatus,
   AgentMessage,
   ChatSession,
 } from './agent';
 import { DiffEntry } from './diffViewer';
 import { FileChange } from './responseParser';
-import { diffToHtml, openNativeDiff } from './diffViewer';
-import { isChromeConnected, registerHeartbeatCallback } from './bridgeServer';
+import { diffToHtml, hunkSideBySideHtml, openNativeDiff } from './diffViewer';
+import {
+  isChromeConnected,
+  registerHeartbeatCallback,
+  getActiveAiProvider,
+  refreshBridgeStatusBar,
+} from './bridgeServer';
 import { ollamaIsRunning } from './ollamaClient';
 import { getWorkspaceRoot, openFile, writeFile, deleteFile, createDir } from './fileTools';
 
@@ -63,14 +71,86 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     registerHeartbeatCallback(() => {
       this.postMessage({ type: 'heartbeat' });
     });
+
+    registerQueueDepthCallback((depth) => {
+      this.postMessage({ type: 'queueDepth', data: depth });
+    });
+
+    this.postMessage({ type: 'providerUpdate', data: getActiveAiProvider() });
+
+    if (this.context.globalState.get<boolean>('aiagent.pendingOnboarding', false)) {
+      void this.context.globalState.update('aiagent.pendingOnboarding', false);
+      this.postMessage({ type: 'showOnboarding' });
+    }
   }
 
   private setupMessageHandling(webview: vscode.Webview): void {
     webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       switch (message.type) {
+        case 'openExternalUrl': {
+          const url = typeof message.data === 'string' ? message.data : '';
+          if (url) {
+            await vscode.env.openExternal(vscode.Uri.parse(url));
+          }
+          break;
+        }
+
         case 'sendTask':
           if (typeof message.data === 'string' && message.data.trim()) {
-            await runPipeline(message.data.trim());
+            await queueTask(message.data.trim(), message.images);
+          }
+          break;
+
+        case 'selectProvider':
+          if (['chatgpt', 'gemini', 'claude'].includes(String(message.data))) {
+            await vscode.workspace
+              .getConfiguration('aiagent')
+              .update('aiProvider', message.data, vscode.ConfigurationTarget.Global);
+            refreshBridgeStatusBar();
+            this.postMessage({ type: 'providerUpdate', data: message.data });
+          }
+          break;
+
+        case 'updateSetting': {
+          const u = message.data as { key: string; value: unknown } | undefined;
+          if (!u?.key) break;
+          await vscode.workspace
+            .getConfiguration('aiagent')
+            .update(u.key, u.value, vscode.ConfigurationTarget.Global);
+          this.postMessage({ type: 'settingUpdated', data: u });
+          break;
+        }
+
+        case 'acceptHunk':
+          if (typeof message.filePath === 'string' && typeof message.hunkId === 'string') {
+            setHunkAccepted(message.filePath, message.hunkId, true);
+            this.postMessage({
+              type: 'hunkState',
+              data: { filePath: message.filePath, hunkId: message.hunkId, accepted: true },
+            });
+          }
+          break;
+
+        case 'rejectHunk':
+          if (typeof message.filePath === 'string' && typeof message.hunkId === 'string') {
+            setHunkAccepted(message.filePath, message.hunkId, false);
+            this.postMessage({
+              type: 'hunkState',
+              data: { filePath: message.filePath, hunkId: message.hunkId, accepted: false },
+            });
+          }
+          break;
+
+        case 'applySingleFile':
+          if (typeof message.data === 'string') {
+            await this.applySingleFile(message.data);
+          }
+          break;
+
+        case 'copyNewContent':
+          if (typeof message.data === 'string') {
+            const text = getEffectiveWriteContent(message.data) ?? '';
+            await vscode.env.clipboard.writeText(text);
           }
           break;
 
@@ -156,7 +236,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (change) {
               try {
                 const root = getWorkspaceRoot();
-                await openNativeDiff(change, root);
+                const merged = getEffectiveWriteContent(message.data);
+                const changeForDiff: FileChange =
+                  change.action === 'write' && merged !== undefined
+                    ? { ...change, content: merged }
+                    : change;
+                await openNativeDiff(changeForDiff, root);
               } catch (err) {
                 vscode.window.showErrorMessage(`Failed to open diff: ${err}`);
               }
@@ -189,12 +274,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'openSettings':
-          // Open VS Code settings filtered to the aiagent namespace
-          vscode.commands.executeCommand(
-            'workbench.action.openSettings',
-            'aiagent'
-          );
+          this.pushSettingsSnapshot();
+          this.postMessage({ type: 'openSettingsOverlay' });
           break;
+
+        case 'getSettings':
+          this.pushSettingsSnapshot();
+          break;
+
+        case 'saveSettings': {
+          const d = message.data as Record<string, unknown> | undefined;
+          if (!d) break;
+          const cfg = vscode.workspace.getConfiguration('aiagent');
+          for (const [k, v] of Object.entries(d)) {
+            await cfg.update(k, v, vscode.ConfigurationTarget.Global);
+          }
+          refreshBridgeStatusBar();
+          const p = cfg.get<string>('aiProvider', 'chatgpt');
+          this.postProviderUpdate(p ?? 'chatgpt');
+          this.postMessage({ type: 'settingsSaved' });
+          break;
+        }
       }
     });
   }
@@ -213,11 +313,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           action: d.action,
           isNew: d.isNew,
           html: diffToHtml(d.diff),
+          hunks: d.hunks.map((h) => ({
+            id: h.id,
+            html: hunkSideBySideHtml(h),
+            accepted: h.accepted,
+          })),
           addedLines: d.addedLines ?? 0,
           removedLines: d.removedLines ?? 0,
         }));
         this.postMessage({
-          type: 'showDiffs',
+          type: 'attachDiffs',
           data: { diffs: diffHtmlParts, summary, changeCount: changes.length },
         });
       }
@@ -272,11 +377,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (!change) return;
 
     try {
-      // Use static imports from fileTools (already imported at top of file)
       switch (change.action) {
-        case 'write':
-          await writeFile(change.path, change.content || '');
+        case 'write': {
+          const merged = getEffectiveWriteContent(filePath) ?? change.content ?? '';
+          await writeFile(change.path, merged);
           break;
+        }
         case 'delete':
           await deleteFile(change.path);
           break;
@@ -292,6 +398,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private pushSettingsSnapshot(): void {
+    const c = vscode.workspace.getConfiguration('aiagent');
+    this.postMessage({
+      type: 'settingsSnapshot',
+      data: {
+        aiProvider: c.get<string>('aiProvider', 'chatgpt'),
+        ollamaUrl: c.get<string>('ollamaUrl', 'http://localhost:11434'),
+        ollamaModel: c.get<string>('ollamaModel', 'qwen2.5-coder:7b'),
+        autoApplyChanges: c.get<boolean>('autoApplyChanges', false),
+        allowTerminalCommands: c.get<boolean>('allowTerminalCommands', false),
+        skipOllamaIfFilesMentioned: c.get<boolean>('skipOllamaIfFilesMentioned', true),
+        responseTimeoutMinutes: c.get<number>('responseTimeoutMinutes', 5),
+        conversationContextTurns: c.get<number>('conversationContextTurns', 5),
+        maxStoredSessions: c.get<number>('maxStoredSessions', 50),
+      },
+    });
+  }
+
   private skipSingleFile(filePath: string): void {
     // Remove from agent state so Apply All does not apply the skipped file
     removePendingChange(filePath);
@@ -304,6 +428,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   public postModelUpdate(modelName: string): void {
     this.postMessage({ type: 'modelUpdate', data: modelName });
+  }
+
+  public postProviderUpdate(provider: string): void {
+    this.postMessage({ type: 'providerUpdate', data: provider });
   }
 
   private getHtmlContent(webview: vscode.Webview): string {
@@ -328,6 +456,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="app">
 
+    <div id="onboarding-banner" class="hidden">
+      <div class="onboarding-icon">🔗</div>
+      <div class="onboarding-body">
+        <div class="onboarding-title">Chrome Extension Required</div>
+        <div class="onboarding-sub">
+          Tab Agent works by connecting to an AI tab in your browser.<br>
+          You need to install the Chrome extension first to get started.
+        </div>
+        <div class="onboarding-actions">
+          <button type="button" class="btn btn-primary btn-onboarding-install"
+            data-url="https://github.com/moego0/tab-agent/tree/main/chrome-extension">
+            ↗ Download Chrome Extension
+          </button>
+          <button type="button" class="btn btn-ghost btn-onboarding-dismiss">I already have it</button>
+        </div>
+        <div class="onboarding-steps">
+          <div class="onboarding-step">
+            <span class="step-num">1</span>
+            Download and unzip the chrome-extension folder
+          </div>
+          <div class="onboarding-step">
+            <span class="step-num">2</span>
+            Open Chrome → chrome://extensions → Enable Developer Mode
+          </div>
+          <div class="onboarding-step">
+            <span class="step-num">3</span>
+            Click "Load unpacked" and select the chrome-extension folder
+          </div>
+          <div class="onboarding-step">
+            <span class="step-num">4</span>
+            Open a ChatGPT, Gemini, or Claude tab — the bridge connects automatically
+          </div>
+        </div>
+      </div>
+      <button type="button" class="onboarding-close" title="Dismiss">✕</button>
+    </div>
+
     <!-- Pipeline step tracker -->
     <div id="pipeline-tracker">
       <div class="pipeline-steps">
@@ -348,7 +513,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         <div class="pipeline-connector"></div>
         <div class="pipeline-step" data-stage="WAITING_FOR_CHATGPT">
           <div class="step-node"><span class="step-icon">◯</span></div>
-          <div class="step-label">ChatGPT</div>
+          <div class="step-label">AI</div>
         </div>
         <div class="pipeline-connector"></div>
         <div class="pipeline-step" data-stage="PARSING_RESPONSE">
@@ -371,8 +536,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- Top action bar -->
     <div id="model-bar">
+      <div id="provider-pills" title="AI provider">
+        <button type="button" class="provider-pill" data-provider="chatgpt">GPT</button>
+        <button type="button" class="provider-pill" data-provider="gemini">Gemini</button>
+        <button type="button" class="provider-pill" data-provider="claude">Claude</button>
+      </div>
       <div id="model-bar-right">
         <button id="btn-new-chat" title="Start New Chat">New Chat</button>
+      </div>
+    </div>
+
+    <div id="settings-overlay" class="hidden">
+      <div class="settings-panel">
+        <div class="settings-header">
+          <span>Agent settings</span>
+          <button type="button" id="btn-close-settings" title="Close">✕</button>
+        </div>
+        <div class="settings-body">
+          <label class="settings-row">AI provider
+            <select id="set-aiProvider">
+              <option value="chatgpt">ChatGPT</option>
+              <option value="gemini">Gemini</option>
+              <option value="claude">Claude</option>
+            </select>
+          </label>
+          <label class="settings-row">Ollama URL <input type="text" id="set-ollamaUrl" /></label>
+          <label class="settings-row">Ollama model <input type="text" id="set-ollamaModel" /></label>
+          <label class="settings-row"><input type="checkbox" id="set-autoApplyChanges" /> Auto-apply changes</label>
+          <label class="settings-row"><input type="checkbox" id="set-allowTerminalCommands" /> Allow terminal commands without confirm</label>
+          <label class="settings-row"><input type="checkbox" id="set-skipOllamaIfFilesMentioned" /> Skip Ollama when @files mentioned</label>
+          <label class="settings-row">Response timeout (min) <input type="number" id="set-responseTimeoutMinutes" min="1" max="120" /></label>
+          <label class="settings-row">Conversation turns <input type="number" id="set-conversationContextTurns" min="0" max="20" /></label>
+          <label class="settings-row">Max stored sessions <input type="number" id="set-maxStoredSessions" min="1" max="200" /></label>
+          <div class="settings-actions">
+            <button type="button" id="btn-settings-save" class="btn btn-primary">Save</button>
+            <button type="button" id="btn-settings-reset" class="btn btn-ghost">Reset defaults</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -435,23 +635,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       <div id="messages"></div>
     </div>
 
-    <!-- Diff accordion panel -->
-    <div id="diff-panel" class="hidden">
-      <div id="diff-header">
-        <span id="diff-summary"></span>
-        <div id="diff-global-actions">
-          <div id="diff-nav-controls">
-            <button id="btn-prev-change" class="btn btn-sm btn-ghost" title="Previous change">←</button>
-            <span id="diff-position">0 / 0</span>
-            <button id="btn-next-change" class="btn btn-sm btn-ghost" title="Next change">→</button>
-          </div>
-          <button id="btn-apply" class="btn btn-primary">Apply All</button>
-          <button id="btn-reject" class="btn btn-danger">Reject All</button>
-        </div>
-      </div>
-      <div id="diff-content"></div>
-    </div>
-
     <!-- Input toolbar -->
     <div id="input-toolbar">
       <button id="btn-model-select" class="tool-btn model-btn" title="Select model">
@@ -467,6 +650,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     <!-- Input area -->
     <div id="input-area">
+      <div id="image-previews" class="hidden"></div>
       <div id="input-wrap">
         <!-- @ mention autocomplete dropdown -->
         <div id="mentions-dropdown" class="hidden"></div>
@@ -499,6 +683,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 interface WebviewMessage {
   type:
+    | 'openExternalUrl'
     | 'sendTask'
     | 'applyChanges'
     | 'rejectChanges'
@@ -507,22 +692,34 @@ interface WebviewMessage {
     | 'openDiff'
     | 'openFile'
     | 'applyFile'
+    | 'applySingleFile'
     | 'skipFile'
     | 'openSettings'
+    | 'getSettings'
+    | 'saveSettings'
     | 'getModel'
     | 'selectModel'
     | 'newChat'
     | 'loadSession'
     | 'deleteSession'
-    | 'clearHistory';
-  data?: string;
+    | 'clearHistory'
+    | 'selectProvider'
+    | 'updateSetting'
+    | 'acceptHunk'
+    | 'rejectHunk'
+    | 'copyNewContent';
+  data?: string | Record<string, unknown>;
+  images?: Array<{ base64: string; mimeType: string; name: string }>;
+  filePath?: string;
+  hunkId?: string;
 }
 
 interface WebviewOutMessage {
   type:
     | 'addMessage'
     | 'statusUpdate'
-    | 'showDiffs'
+    | 'showOnboarding'
+    | 'attachDiffs'
     | 'clearDiffs'
     | 'clearAll'
     | 'connectionStatus'
@@ -533,7 +730,15 @@ interface WebviewOutMessage {
     | 'modelUpdate'
     | 'newChat'
     | 'historyUpdated'
-    | 'showSession';
+    | 'showSession'
+    | 'providerUpdate'
+    | 'queueDepth'
+    | 'settingUpdated'
+    | 'hunkState'
+    | 'settingsSnapshot'
+    | 'openSettingsOverlay'
+    | 'settingsSaved'
+    | 'settingUpdated';
   data?: unknown;
 }
 

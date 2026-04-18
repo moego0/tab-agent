@@ -2,18 +2,87 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { createPatch } from 'diff';
+import { createPatch, structuredPatch } from 'diff';
 import { FileChange } from './responseParser';
 import { readFile, fileExists } from './fileTools';
+
+export interface DiffHunk {
+  id: string;
+  oldStart: number;
+  oldLines: string[];
+  newStart: number;
+  newLines: string[];
+  accepted: boolean | null;
+}
 
 export interface DiffEntry {
   path: string;
   action: 'write' | 'delete' | 'mkdir';
   isNew: boolean;
   diff: string;
+  hunks: DiffHunk[];
+  fullNewContent: string;
+  oldContent: string;
   newContent?: string;
   addedLines?: number;
   removedLines?: number;
+}
+
+export function mergeContentWithHunks(
+  oldContent: string,
+  newContent: string,
+  hunks: DiffHunk[]
+): string {
+  if (hunks.length === 0) {
+    return newContent;
+  }
+  if (hunks.every((h) => h.accepted === false)) {
+    return oldContent;
+  }
+  if (hunks.every((h) => h.accepted !== false)) {
+    return newContent;
+  }
+
+  const resultLines = oldContent.split('\n');
+  const sorted = [...hunks].sort((a, b) => b.oldStart - a.oldStart);
+  for (const h of sorted) {
+    if (h.accepted === false) {
+      continue;
+    }
+    const start = Math.max(0, h.oldStart - 1);
+    const oldLen = h.oldLines.length;
+    resultLines.splice(start, oldLen, ...h.newLines);
+  }
+  return resultLines.join('\n');
+}
+
+function hunksFromStructuredPatch(filePath: string, patch: ReturnType<typeof structuredPatch>): DiffHunk[] {
+  const res: DiffHunk[] = [];
+  patch.hunks.forEach((h, i) => {
+    const oldL: string[] = [];
+    const newL: string[] = [];
+    for (const line of h.lines) {
+      const prefix = line[0];
+      const text = line.length > 1 ? line.slice(1).replace(/\n$/, '') : '';
+      if (prefix === ' ') {
+        oldL.push(text);
+        newL.push(text);
+      } else if (prefix === '-') {
+        oldL.push(text);
+      } else if (prefix === '+') {
+        newL.push(text);
+      }
+    }
+    res.push({
+      id: `${filePath}:hunk:${i}`,
+      oldStart: h.oldStart,
+      oldLines: oldL,
+      newStart: h.newStart,
+      newLines: newL,
+      accepted: null,
+    });
+  });
+  return res;
 }
 
 export async function computeDiffs(changes: FileChange[]): Promise<DiffEntry[]> {
@@ -42,13 +111,27 @@ export async function computeDiffs(changes: FileChange[]): Promise<DiffEntry[]> 
         { context: 3 }
       );
 
+      const structured = structuredPatch(
+        change.path,
+        change.path,
+        oldContent,
+        newContent,
+        '',
+        '',
+        { context: 3 }
+      );
+
       const { added, removed } = countDiffLines(patch);
+      const hunks = hunksFromStructuredPatch(change.path, structured);
 
       diffs.push({
         path: change.path,
         action: 'write',
         isNew: !exists,
         diff: patch,
+        hunks,
+        fullNewContent: newContent,
+        oldContent,
         newContent,
         addedLines: added,
         removedLines: removed,
@@ -61,15 +144,16 @@ export async function computeDiffs(changes: FileChange[]): Promise<DiffEntry[]> 
         oldContent = '(file not found)';
       }
 
-      const patch = createPatch(
+      const patch = createPatch(change.path, oldContent, '', 'original', 'deleted', { context: 3 });
+      const structured = structuredPatch(
+        change.path,
         change.path,
         oldContent,
         '',
-        'original',
-        'deleted',
+        '',
+        '',
         { context: 3 }
       );
-
       const { added, removed } = countDiffLines(patch);
 
       diffs.push({
@@ -77,6 +161,10 @@ export async function computeDiffs(changes: FileChange[]): Promise<DiffEntry[]> 
         action: 'delete',
         isNew: false,
         diff: patch,
+        hunks: hunksFromStructuredPatch(change.path, structured),
+        fullNewContent: '',
+        oldContent,
+        newContent: '',
         addedLines: added,
         removedLines: removed,
       });
@@ -86,6 +174,9 @@ export async function computeDiffs(changes: FileChange[]): Promise<DiffEntry[]> 
         action: 'mkdir',
         isNew: true,
         diff: `Create directory: ${change.path}`,
+        hunks: [],
+        fullNewContent: '',
+        oldContent: '',
         addedLines: 0,
         removedLines: 0,
       });
@@ -105,8 +196,6 @@ function countDiffLines(patch: string): { added: number; removed: number } {
   return { added, removed };
 }
 
-// Open a native VS Code diff tab showing current file vs proposed content.
-// The proposed content is written to a temp file so VS Code can display a real diff editor.
 export async function openNativeDiff(
   change: FileChange,
   workspaceRoot: string
@@ -177,6 +266,22 @@ export function diffToHtml(diff: string): string {
   }
 
   return htmlLines.join('');
+}
+
+export function hunkSideBySideHtml(h: DiffHunk): string {
+  const max = Math.max(h.oldLines.length, h.newLines.length);
+  const rows: string[] = [];
+  for (let i = 0; i < max; i++) {
+    const oldL = h.oldLines[i] ?? '';
+    const newL = h.newLines[i] ?? '';
+    const cls =
+      oldL === newL ? 'diff-side-row ctx' : oldL && !newL ? 'diff-side-row del' : 'diff-side-row add';
+    rows.push(
+      `<div class="${cls}"><span class="diff-old">${escapeHtml(oldL || ' ')}</span>` +
+        `<span class="diff-new">${escapeHtml(newL || ' ')}</span></div>`
+    );
+  }
+  return rows.join('');
 }
 
 function escapeHtml(text: string): string {

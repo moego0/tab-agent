@@ -4,15 +4,22 @@ export interface FileChange {
   content?: string;
 }
 
+export interface TerminalCommand {
+  command: string;
+  workingDir?: string;
+}
+
 export interface ParsedResponse {
   changes: FileChange[];
   summary: string;
   rawResponse: string;
+  terminalCommands: TerminalCommand[];
 }
 
 export function parseResponse(response: string): ParsedResponse {
   const changes: FileChange[] = [];
   const summary = extractSummary(response);
+  const terminalCommands = extractRunCommands(response);
 
   // Accept both:
   //   <<<FILE: path>>>
@@ -54,7 +61,25 @@ export function parseResponse(response: string): ParsedResponse {
     changes,
     summary: summary || extractFallbackSummary(response, changes.length),
     rawResponse: response,
+    terminalCommands,
   };
+}
+
+function extractRunCommands(response: string): TerminalCommand[] {
+  const cmds: TerminalCommand[] = [];
+  const runRegex = /<<<RUN:\s*([\s\S]*?)>>>/g;
+  let m: RegExpExecArray | null;
+  while ((m = runRegex.exec(response)) !== null) {
+    const inner = m[1].trim();
+    if (!inner) continue;
+    const wdMatch = inner.match(/^cwd:\s*([^\n]+)\n([\s\S]*)$/i);
+    if (wdMatch) {
+      cmds.push({ command: wdMatch[2].trim(), workingDir: wdMatch[1].trim() });
+    } else {
+      cmds.push({ command: inner });
+    }
+  }
+  return cmds;
 }
 
 function extractSummary(response: string): string {

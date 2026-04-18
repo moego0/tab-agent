@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
 import { WebSocketServer, WebSocket } from 'ws';
 
+export type AiProvider = 'chatgpt' | 'gemini' | 'claude';
+
 interface BridgeMessage {
   type: 'PROMPT' | 'PROMPT_WITH_FILES' | 'RESPONSE' | 'STATUS' | 'ERROR' | 'HEARTBEAT';
   payload: string;
   files?: BridgeFileAttachment[];
+  provider?: AiProvider;
 }
 
 export interface BridgeFileAttachment {
@@ -24,13 +27,38 @@ type ResponseResolver = {
 type HeartbeatCallback = () => void;
 
 const PORT = 52000;
-const CHATGPT_TIMEOUT_MS = 5 * 60 * 1000;
 
 let wss: WebSocketServer | null = null;
 let chromeSocket: WebSocket | null = null;
 let statusBarItem: vscode.StatusBarItem | null = null;
 let pendingResponse: ResponseResolver | null = null;
 let onHeartbeat: HeartbeatCallback | null = null;
+
+function getResponseTimeoutMs(isFileUpload: boolean): number {
+  const mins =
+    vscode.workspace.getConfiguration('aiagent').get<number>('responseTimeoutMinutes', 5) ?? 5;
+  const base = Math.max(1, mins) * 60 * 1000;
+  return isFileUpload ? base * 2 : base;
+}
+
+export function getActiveAiProvider(): AiProvider {
+  const p = vscode.workspace.getConfiguration('aiagent').get<string>('aiProvider', 'chatgpt');
+  if (p === 'gemini' || p === 'claude' || p === 'chatgpt') {
+    return p;
+  }
+  return 'chatgpt';
+}
+
+function providerLabel(p: AiProvider): string {
+  switch (p) {
+    case 'gemini':
+      return 'Gemini';
+    case 'claude':
+      return 'Claude';
+    default:
+      return 'ChatGPT';
+  }
+}
 
 export function startBridgeServer(context: vscode.ExtensionContext): void {
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -64,10 +92,11 @@ export function startBridgeServer(context: vscode.ExtensionContext): void {
         chromeSocket = null;
         updateStatusBar(false);
       }
-      if (pendingResponse) {
-        pendingResponse.reject(new Error('Chrome extension disconnected while waiting for response'));
-        clearTimeout(pendingResponse.timer);
-        pendingResponse = null;
+      const pr = pendingResponse;
+      pendingResponse = null;
+      if (pr) {
+        clearTimeout(pr.timer);
+        pr.reject(new Error('Chrome extension disconnected while waiting for response'));
       }
     });
 
@@ -79,7 +108,9 @@ export function startBridgeServer(context: vscode.ExtensionContext): void {
   wss.on('error', (err) => {
     if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
       outputLog(`Port ${PORT} already in use. Another instance may be running.`);
-      vscode.window.showWarningMessage(`Local tab agent: Port ${PORT} is in use. Bridge may already be running.`);
+      vscode.window.showWarningMessage(
+        `Local tab agent: Port ${PORT} is in use. Bridge may already be running.`
+      );
     } else {
       outputLog(`Bridge server error: ${err.message}`);
     }
@@ -87,10 +118,11 @@ export function startBridgeServer(context: vscode.ExtensionContext): void {
 }
 
 export function stopBridgeServer(): void {
-  if (pendingResponse) {
-    clearTimeout(pendingResponse.timer);
-    pendingResponse.reject(new Error('Bridge server shutting down'));
-    pendingResponse = null;
+  const pr = pendingResponse;
+  pendingResponse = null;
+  if (pr) {
+    clearTimeout(pr.timer);
+    pr.reject(new Error('Bridge server shutting down'));
   }
   if (chromeSocket) {
     chromeSocket.close();
@@ -106,23 +138,23 @@ export function stopBridgeServer(): void {
   }
 }
 
-// Register a callback invoked each time Chrome sends a HEARTBEAT while waiting.
-// Used by SidebarProvider to forward liveness signals to the webview.
 export function registerHeartbeatCallback(cb: HeartbeatCallback): void {
   onHeartbeat = cb;
 }
 
 function handleIncomingMessage(msg: BridgeMessage): void {
   switch (msg.type) {
-    case 'RESPONSE':
-      if (pendingResponse) {
-        clearTimeout(pendingResponse.timer);
-        pendingResponse.resolve(msg.payload);
-        pendingResponse = null;
-      } else {
-        outputLog('Received RESPONSE but no pending request');
+    case 'RESPONSE': {
+      const pr = pendingResponse;
+      if (!pr) {
+        outputLog('Warning: received RESPONSE from Chrome but no request is pending — ignoring.');
+        break;
       }
+      pendingResponse = null;
+      clearTimeout(pr.timer);
+      pr.resolve(msg.payload);
       break;
+    }
 
     case 'STATUS':
       outputLog(`Bridge status: ${msg.payload}`);
@@ -131,15 +163,19 @@ function handleIncomingMessage(msg: BridgeMessage): void {
 
     case 'ERROR':
       outputLog(`Bridge error from Chrome: ${msg.payload}`);
-      if (pendingResponse) {
-        clearTimeout(pendingResponse.timer);
-        pendingResponse.reject(new Error(`ChatGPT error: ${msg.payload}`));
+      {
+        const pr = pendingResponse;
         pendingResponse = null;
+        if (pr) {
+          clearTimeout(pr.timer);
+          pr.reject(new Error(`AI tab error: ${msg.payload}`));
+        } else {
+          outputLog('Warning: ERROR from Chrome but no pending request — ignoring.');
+        }
       }
       break;
 
     case 'HEARTBEAT':
-      // Chrome is still alive and waiting for ChatGPT to finish
       onHeartbeat?.();
       break;
 
@@ -151,27 +187,34 @@ function handleIncomingMessage(msg: BridgeMessage): void {
 export function sendToChatGPT(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!chromeSocket || chromeSocket.readyState !== WebSocket.OPEN) {
-      reject(new Error('Chrome bridge is not connected. Please ensure the Chrome extension is running and connected.'));
+      reject(
+        new Error(
+          'Chrome bridge is not connected. Please ensure the Chrome extension is running and connected.'
+        )
+      );
       return;
     }
 
     if (pendingResponse) {
-      reject(new Error('A ChatGPT request is already in progress. Please wait.'));
+      reject(new Error('An AI request is already in progress. Please wait.'));
       return;
     }
 
+    const timeoutMs = getResponseTimeoutMs(false);
     const timer = setTimeout(() => {
-      if (pendingResponse) {
-        pendingResponse = null;
-        reject(new Error('ChatGPT response timed out after 5 minutes'));
+      const pr = pendingResponse;
+      pendingResponse = null;
+      if (pr) {
+        pr.reject(new Error(`AI response timed out after ${Math.round(timeoutMs / 60000)} minutes`));
       }
-    }, CHATGPT_TIMEOUT_MS);
+    }, timeoutMs);
 
     pendingResponse = { resolve, reject, timer };
 
     const msg: BridgeMessage = {
       type: 'PROMPT',
       payload: prompt,
+      provider: getActiveAiProvider(),
     };
 
     chromeSocket.send(JSON.stringify(msg), (err) => {
@@ -184,34 +227,35 @@ export function sendToChatGPT(prompt: string): Promise<string> {
   });
 }
 
-// Send a prompt to ChatGPT with real file attachments.
-// files: array of base64-encoded file data prepared by fileUploadValidator.
-// The prompt text should describe the task and repo structure but should
-// NOT inline file contents — the attached files provide that context.
 export function sendToChatGPTWithFiles(
   prompt: string,
   files: BridgeFileAttachment[]
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!chromeSocket || chromeSocket.readyState !== WebSocket.OPEN) {
-      reject(new Error(
-        'Chrome bridge is not connected. Please ensure the Chrome extension is running.'
-      ));
+      reject(
+        new Error('Chrome bridge is not connected. Please ensure the Chrome extension is running.')
+      );
       return;
     }
 
     if (pendingResponse) {
-      reject(new Error('A ChatGPT request is already in progress. Please wait.'));
+      reject(new Error('An AI request is already in progress. Please wait.'));
       return;
     }
 
+    const timeoutMs = getResponseTimeoutMs(true);
     const timer = setTimeout(() => {
-      if (pendingResponse) {
-        pendingResponse = null;
-        // Extend timeout for file uploads — they take longer
-        reject(new Error('ChatGPT response timed out (file upload may have failed)'));
+      const pr = pendingResponse;
+      pendingResponse = null;
+      if (pr) {
+        pr.reject(
+          new Error(
+            `AI response timed out after ${Math.round(timeoutMs / 60000)} minutes (file upload mode)`
+          )
+        );
       }
-    }, CHATGPT_TIMEOUT_MS * 2); // double timeout for file uploads
+    }, timeoutMs);
 
     pendingResponse = { resolve, reject, timer };
 
@@ -219,11 +263,11 @@ export function sendToChatGPTWithFiles(
       type: 'PROMPT_WITH_FILES',
       payload: prompt,
       files,
+      provider: getActiveAiProvider(),
     };
 
     outputLog(
-      `Sending PROMPT_WITH_FILES to Chrome: ${files.length} file(s), ` +
-      `prompt ${prompt.length} chars`
+      `Sending PROMPT_WITH_FILES to Chrome: ${files.length} file(s), ` + `prompt ${prompt.length} chars`
     );
 
     chromeSocket.send(JSON.stringify(msg), (err) => {
@@ -240,12 +284,17 @@ export function isChromeConnected(): boolean {
   return chromeSocket !== null && chromeSocket.readyState === WebSocket.OPEN;
 }
 
+export function refreshBridgeStatusBar(): void {
+  updateStatusBar(isChromeConnected());
+}
+
 function updateStatusBar(connected: boolean): void {
   if (!statusBarItem) return;
   if (connected) {
-    statusBarItem.text = '$(check) ChatGPT Bridge Connected';
+    const p = getActiveAiProvider();
+    statusBarItem.text = `$(check) AI Bridge: ${providerLabel(p)} Connected`;
     statusBarItem.backgroundColor = undefined;
-    statusBarItem.tooltip = 'Chrome extension is connected to the Local tab agent bridge';
+    statusBarItem.tooltip = `Chrome extension is connected (${providerLabel(p)}). Click to check.`;
   } else {
     statusBarItem.text = '$(error) Bridge Disconnected';
     statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');

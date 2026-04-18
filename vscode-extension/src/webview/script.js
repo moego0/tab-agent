@@ -9,19 +9,12 @@
   const btnSend = document.getElementById('btn-send');
   const btnSendLabel = document.getElementById('btn-send-label');
   const btnSendSpinner = document.getElementById('btn-send-spinner');
-  const btnApply = document.getElementById('btn-apply');
-  const btnReject = document.getElementById('btn-reject');
-  const btnPrevChange = document.getElementById('btn-prev-change');
-  const btnNextChange = document.getElementById('btn-next-change');
-  const diffPosition = document.getElementById('diff-position');
   const btnCheckStatus = document.getElementById('btn-check-status');
   const btnClear = document.getElementById('btn-clear');
   const btnSettings = document.getElementById('btn-settings');
   const btnAttach = document.getElementById('btn-attach');
   const btnHistory = document.getElementById('btn-history');
-  const diffPanel = document.getElementById('diff-panel');
-  const diffSummary = document.getElementById('diff-summary');
-  const diffContent = document.getElementById('diff-content');
+  const onboardingBanner = document.getElementById('onboarding-banner');
   const connectionInfo = document.getElementById('connection-info');
   const ollamaStatus = document.getElementById('ollama-status');
   const bridgeStatus = document.getElementById('bridge-status');
@@ -53,9 +46,16 @@
   let waitingStartTime = 0;
   let waitingInterval = null;
   let hasMessages = false;
-  let pendingDiffData = null;
   let sessionHistory = [];
-  let currentDiffIndex = -1;
+  let lastUserTask = '';
+  const pinnedFiles = new Set();
+  let pendingImageAttachments = [];
+  const providerPills = document.getElementById('provider-pills');
+  const settingsOverlay = document.getElementById('settings-overlay');
+  const btnCloseSettings = document.getElementById('btn-close-settings');
+  const btnSettingsSave = document.getElementById('btn-settings-save');
+  const btnSettingsReset = document.getElementById('btn-settings-reset');
+  const imagePreviews = document.getElementById('image-previews');
 
   const STAGE_ORDER = [
     'SCANNING_REPO',
@@ -104,7 +104,7 @@
     const elapsed = Math.floor((Date.now() - waitingStartTime) / 1000);
     const m = Math.floor(elapsed / 60);
     const s = elapsed % 60;
-    waitingTimer.textContent = `Waiting for ChatGPT… ${m}:${String(s).padStart(2, '0')}`;
+    waitingTimer.textContent = `Waiting for AI… ${m}:${String(s).padStart(2, '0')}`;
   }
 
   function stopWaitingTimer() {
@@ -137,19 +137,256 @@
       contextSection.classList.add('hidden');
       return;
     }
+    const mentionRe = /@([\w./\\-]+)/g;
+    let m;
+    while ((m = mentionRe.exec(lastUserTask)) !== null) {
+      pinnedFiles.add(m[1]);
+    }
     ctxChips.innerHTML = '';
-    files.forEach((f) => {
-      const chip = document.createElement('button');
-      chip.className = 'ctx-chip';
-      chip.textContent = f.split('/').pop() || f;
-      chip.title = f;
-      chip.addEventListener('click', () => {
-        vscode.postMessage({ type: 'openFile', data: f });
+    const pinned = files.filter((f) => pinnedFiles.has(f));
+    const auto = files.filter((f) => !pinnedFiles.has(f));
+    const addSection = (label, list, icon) => {
+      if (list.length === 0) return;
+      const h = document.createElement('div');
+      h.className = 'ctx-section-label';
+      h.textContent = `${icon} ${label}`;
+      ctxChips.appendChild(h);
+      list.forEach((f) => {
+        const chip = document.createElement('button');
+        chip.className = 'ctx-chip' + (pinnedFiles.has(f) ? ' ctx-pinned' : '');
+        chip.textContent = (pinnedFiles.has(f) ? '📌 ' : '') + (f.split('/').pop() || f);
+        chip.title = f;
+        chip.addEventListener('click', () => {
+          vscode.postMessage({ type: 'openFile', data: f });
+        });
+        ctxChips.appendChild(chip);
       });
-      ctxChips.appendChild(chip);
-    });
+    };
+    addSection('Pinned', pinned, '📌');
+    addSection('Auto-selected', auto, '🤖');
     ctxToggle.textContent = `▶ Context: ${files.length} file${files.length !== 1 ? 's' : ''}`;
     contextSection.classList.remove('hidden');
+  }
+
+  function showOnboarding() {
+    if (onboardingBanner) onboardingBanner.classList.remove('hidden');
+  }
+
+  function dismissOnboarding() {
+    if (onboardingBanner) onboardingBanner.classList.add('hidden');
+  }
+
+  function renderAgentText(text) {
+    const div = document.createElement('div');
+    div.className = 'agent-text-content';
+    const parts = String(text).split(/(```[\s\S]*?```)/g);
+    parts.forEach((part) => {
+      if (part.startsWith('```')) {
+        const langMatch = part.match(/^```(\w+)?/);
+        const lang = langMatch?.[1] || '';
+        const code = part.replace(/^```\w*\n?/, '').replace(/```$/, '');
+        const codeBlock = document.createElement('div');
+        codeBlock.className = 'code-block';
+        codeBlock.innerHTML = `
+        <div class="code-block-header">
+          <span class="code-lang">${lang || 'code'}</span>
+          <button type="button" class="btn-copy-code" title="Copy">⧉ Copy</button>
+        </div>
+        <pre class="code-content"><code>${escapeHtml(code)}</code></pre>
+      `;
+        codeBlock.querySelector('.btn-copy-code')?.addEventListener('click', () => {
+          navigator.clipboard.writeText(code);
+          const btn = codeBlock.querySelector('.btn-copy-code');
+          if (btn) {
+            btn.textContent = '✓ Copied';
+            setTimeout(() => {
+              btn.textContent = '⧉ Copy';
+            }, 2000);
+          }
+        });
+        div.appendChild(codeBlock);
+      } else if (part.trim()) {
+        const p = document.createElement('p');
+        p.className = 'agent-text-para';
+        p.textContent = part.trim();
+        div.appendChild(p);
+      }
+    });
+    return div;
+  }
+
+  function buildTerminalBlock(command, output, exitCode) {
+    const block = document.createElement('div');
+    block.className = `terminal-block ${exitCode === 0 ? 'success' : 'error'}`;
+    block.innerHTML = `
+    <div class="terminal-header">
+      <span class="terminal-dot red"></span>
+      <span class="terminal-dot yellow"></span>
+      <span class="terminal-dot green"></span>
+      <span class="terminal-title">Terminal</span>
+      <button type="button" class="btn-copy-terminal" title="Copy output">⧉</button>
+    </div>
+    <div class="terminal-body">
+      <div class="terminal-cmd">$ ${escapeHtml(command)}</div>
+      <pre class="terminal-output">${escapeHtml(output)}</pre>
+      ${
+        exitCode !== 0
+          ? `<div class="terminal-exit-code">Exit code: ${exitCode}</div>`
+          : `<div class="terminal-exit-success">✓ Command completed</div>`
+      }
+    </div>
+  `;
+    block.querySelector('.btn-copy-terminal')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(`$ ${command}\n${output}`);
+    });
+    return block;
+  }
+
+  function buildTaskCompleteCard(result) {
+    const card = document.createElement('div');
+    card.className = 'task-complete-card';
+    const hasErrors = result.errors && result.errors.length > 0;
+    card.innerHTML = `
+    <div class="task-complete-header ${hasErrors ? 'with-errors' : 'success'}">
+      <span class="task-complete-icon">${hasErrors ? '⚠️' : '✅'}</span>
+      <span class="task-complete-title">${hasErrors ? 'Completed with warnings' : 'Task complete'}</span>
+    </div>
+    <div class="task-complete-stats">
+      ${result.filesWritten > 0 ? `<div class="stat-row"><span>Files written</span><span class="stat-val">${result.filesWritten}</span></div>` : ''}
+      ${result.filesDeleted > 0 ? `<div class="stat-row"><span>Files deleted</span><span class="stat-val">${result.filesDeleted}</span></div>` : ''}
+      ${result.dirsCreated > 0 ? `<div class="stat-row"><span>Dirs created</span><span class="stat-val">${result.dirsCreated}</span></div>` : ''}
+      ${result.terminalCommands > 0 ? `<div class="stat-row"><span>Commands run</span><span class="stat-val">${result.terminalCommands}</span></div>` : ''}
+    </div>
+    ${
+      hasErrors
+        ? `<div class="task-errors">${result.errors.map((e) => `<div class="task-error-line">⚠ ${escapeHtml(e)}</div>`).join('')}</div>`
+        : ''
+    }
+  `;
+    return card;
+  }
+
+  function buildDiffLines(d) {
+    if (d.hunks && d.hunks.length > 0) {
+      return d.hunks
+        .map(
+          (h) => `
+      <div class="diff-hunk">
+        <div class="diff-hunk-header">@@ -${h.oldStart} +${h.newStart} @@</div>
+        ${h.html}
+      </div>
+    `
+        )
+        .join('');
+    }
+    return d.html || '';
+  }
+
+  function buildInlineFileCard(d) {
+    const card = document.createElement('div');
+    card.className = 'inline-file-card';
+    card.dataset.path = d.path;
+
+    const isNew = d.isNew;
+    const icon = d.action === 'delete' ? '🗑' : d.action === 'mkdir' ? '📁' : isNew ? '✨' : '📝';
+    const badgeLabel = d.action === 'write' ? (isNew ? 'NEW' : 'MOD') : d.action === 'mkdir' ? 'DIR' : 'DEL';
+    const badgeClass = `diff-badge ${d.action}${isNew ? ' new' : ''}`;
+    const addCount = d.addedLines || 0;
+    const remCount = d.removedLines || 0;
+
+    card.innerHTML = `
+    <div class="inline-file-header">
+      <button type="button" class="file-expand-btn" aria-expanded="false" title="Expand diff">▶</button>
+      <span class="file-icon">${icon}</span>
+      <span class="file-path" title="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>
+      <span class="${badgeClass}">${badgeLabel}</span>
+      <span class="diff-line-counts">
+        ${addCount > 0 ? `<span class="diff-add-count">+${addCount}</span>` : ''}
+        ${remCount > 0 ? `<span class="diff-rem-count">-${remCount}</span>` : ''}
+      </span>
+      <div class="file-actions">
+        <button type="button" class="btn btn-xs btn-ghost btn-open-file" title="Open in editor">Open</button>
+        <button type="button" class="btn btn-xs btn-primary btn-apply-file">Apply</button>
+        <button type="button" class="btn btn-xs btn-ghost btn-skip-file">Skip</button>
+      </div>
+    </div>
+    <div class="inline-diff-body collapsed">
+      <div class="diff-code-view">${buildDiffLines(d)}</div>
+    </div>
+  `;
+
+    const expandBtn = card.querySelector('.file-expand-btn');
+    const body = card.querySelector('.inline-diff-body');
+    expandBtn?.addEventListener('click', () => {
+      const isOpen = !body?.classList.contains('collapsed');
+      body?.classList.toggle('collapsed', !!isOpen);
+      if (expandBtn && body) {
+        expandBtn.textContent = isOpen ? '▶' : '▼';
+        expandBtn.setAttribute('aria-expanded', String(!isOpen));
+      }
+    });
+
+    card.querySelector('.btn-open-file')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'openFile', data: d.path });
+    });
+    card.querySelector('.btn-apply-file')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'applySingleFile', data: d.path });
+      card.classList.add('applied');
+    });
+    card.querySelector('.btn-skip-file')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'skipFile', data: d.path });
+      card.classList.add('skipped');
+    });
+
+    return card;
+  }
+
+  function buildInlineChangesBlock(diffs, _summary) {
+    const block = document.createElement('div');
+    block.className = 'inline-changes-block';
+
+    const header = document.createElement('div');
+    header.className = 'inline-changes-header';
+    const totalAdded = diffs.reduce((s, d) => s + (d.addedLines || 0), 0);
+    const totalRemoved = diffs.reduce((s, d) => s + (d.removedLines || 0), 0);
+    header.innerHTML = `
+    <span class="changes-count">${diffs.length} file${diffs.length !== 1 ? 's' : ''} changed</span>
+    <span class="changes-stats">
+      ${totalAdded > 0 ? `<span class="diff-add-count">+${totalAdded}</span>` : ''}
+      ${totalRemoved > 0 ? `<span class="diff-rem-count">-${totalRemoved}</span>` : ''}
+    </span>
+    <div class="changes-global-actions">
+      <button type="button" class="btn btn-sm btn-primary btn-apply-all-inline">✓ Apply All</button>
+      <button type="button" class="btn btn-sm btn-ghost btn-reject-all-inline">✗ Reject All</button>
+    </div>
+  `;
+    block.appendChild(header);
+
+    diffs.forEach((d) => {
+      block.appendChild(buildInlineFileCard(d));
+    });
+
+    block.querySelector('.btn-apply-all-inline')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'applyChanges' });
+    });
+    block.querySelector('.btn-reject-all-inline')?.addEventListener('click', () => {
+      vscode.postMessage({ type: 'rejectChanges' });
+      block.remove();
+    });
+
+    return block;
+  }
+
+  function findInlineFileCard(filePath) {
+    return Array.from(messagesDiv.querySelectorAll('.inline-file-card')).find((c) => c.dataset.path === filePath);
+  }
+
+  function attachDiffsToLastAgent(data) {
+    const agents = messagesDiv.querySelectorAll('.message-agent');
+    const last = agents[agents.length - 1];
+    if (!last || !data?.diffs) return;
+    last.appendChild(buildInlineChangesBlock(data.diffs, data.summary));
+    scrollToBottom();
   }
 
   function buildMessageElement(msg) {
@@ -160,6 +397,38 @@
     }
 
     if (msg.role === 'system') {
+      if (msg.subtype === 'terminal') {
+        try {
+          const t = JSON.parse(msg.content);
+          el.appendChild(
+            buildTerminalBlock(String(t.command ?? ''), String(t.output ?? ''), Number(t.exitCode ?? 0))
+          );
+        } catch {
+          const span = document.createElement('span');
+          span.textContent = msg.content;
+          el.appendChild(span);
+        }
+        const timeEl = document.createElement('div');
+        timeEl.className = 'message-time';
+        timeEl.textContent = new Date(msg.timestamp).toLocaleTimeString();
+        el.appendChild(timeEl);
+        return el;
+      }
+      if (msg.subtype === 'taskComplete') {
+        try {
+          const r = JSON.parse(msg.content);
+          el.appendChild(buildTaskCompleteCard(r));
+        } catch {
+          const span = document.createElement('span');
+          span.textContent = msg.content;
+          el.appendChild(span);
+        }
+        const timeEl = document.createElement('div');
+        timeEl.className = 'message-time';
+        timeEl.textContent = new Date(msg.timestamp).toLocaleTimeString();
+        el.appendChild(timeEl);
+        return el;
+      }
       const iconMap = { scanning: '🔍', info: '●', success: '✅', error: '❌', warning: '⚠️' };
       const icon = iconMap[msg.subtype] || '●';
       const contentEl = document.createElement('span');
@@ -168,25 +437,25 @@
       return el;
     }
 
+    if (msg.role === 'agent') {
+      const badge = document.createElement('div');
+      badge.className = 'agent-badge';
+      badge.textContent = 'Agent';
+      el.appendChild(badge);
+      const summaryEl = document.createElement('div');
+      summaryEl.className = 'agent-summary-text';
+      summaryEl.appendChild(renderAgentText(msg.content));
+      el.appendChild(summaryEl);
+      const timeEl = document.createElement('div');
+      timeEl.className = 'message-time';
+      timeEl.textContent = new Date(msg.timestamp).toLocaleTimeString();
+      el.appendChild(timeEl);
+      return el;
+    }
+
     const contentEl = document.createElement('div');
     contentEl.textContent = msg.content;
     el.appendChild(contentEl);
-
-    if (msg.role === 'agent' && msg.filesChanged && msg.filesChanged.length > 0) {
-      const chipsRow = document.createElement('div');
-      chipsRow.className = 'files-changed-chips';
-      msg.filesChanged.forEach((f) => {
-        const chip = document.createElement('button');
-        chip.className = 'file-chip write';
-        chip.textContent = f.split('/').pop() || f;
-        chip.title = `Open diff for ${f}`;
-        chip.addEventListener('click', () => {
-          vscode.postMessage({ type: 'openDiff', data: f });
-        });
-        chipsRow.appendChild(chip);
-      });
-      el.appendChild(chipsRow);
-    }
 
     const timeEl = document.createElement('div');
     timeEl.className = 'message-time';
@@ -208,154 +477,8 @@
     });
   }
 
-  function showDiffs(data) {
-    pendingDiffData = data;
-    diffPanel.classList.remove('hidden');
-    diffSummary.textContent = data.summary || `${data.changeCount} change(s) ready`;
-    diffContent.innerHTML = '';
-
-    data.diffs.forEach((d) => {
-      const row = document.createElement('div');
-      row.className = 'diff-file-row';
-      row.dataset.path = d.path;
-      const badgeClass = d.action === 'write' ? (d.isNew ? 'write new' : 'write mod') : d.action;
-      const badgeLabel =
-        d.action === 'write' ? (d.isNew ? 'NEW' : 'MODIFIED') : d.action === 'mkdir' ? 'DIR' : 'DELETED';
-      const addCount = d.addedLines || 0;
-      const remCount = d.removedLines || 0;
-      const icon = d.action === 'delete' ? '🗑️' : d.action === 'mkdir' ? '📁' : d.isNew ? '✨' : '📝';
-
-      row.innerHTML = `
-        <div class="diff-file-toggle">
-          <span class="diff-expand-arrow">▶</span>
-          <span title="${d.path}">${icon} <span class="diff-file-path">${d.path.split('/').pop() || d.path}</span></span>
-          <span class="diff-action-badge ${badgeClass}">${badgeLabel}</span>
-          <span class="diff-line-counts">
-            ${addCount > 0 ? `<span class="diff-add-count">+${addCount}</span>` : ''}
-            ${remCount > 0 ? `<span class="diff-rem-count">-${remCount}</span>` : ''}
-          </span>
-          <div class="diff-per-file-actions">
-            <button class="btn btn-sm btn-primary btn-apply-file">Apply</button>
-            <button class="btn btn-sm btn-ghost btn-skip-file">Skip</button>
-          </div>
-        </div>
-        <div class="diff-file-body">${d.html}</div>
-      `;
-
-      const toggle = row.querySelector('.diff-file-toggle');
-      const body = row.querySelector('.diff-file-body');
-      const arrow = row.querySelector('.diff-expand-arrow');
-      toggle.addEventListener('click', (e) => {
-        if (e.target.closest('.diff-per-file-actions')) return;
-        body.classList.toggle('open');
-        arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
-      });
-
-      row.querySelector('.btn-apply-file').addEventListener('click', (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: 'applyFile', data: d.path });
-      });
-
-      row.querySelector('.btn-skip-file').addEventListener('click', (e) => {
-        e.stopPropagation();
-        vscode.postMessage({ type: 'skipFile', data: d.path });
-      });
-
-      diffContent.appendChild(row);
-    });
-
-    if (data.diffs.length > 0) {
-      focusDiffAt(0, true);
-    } else {
-      currentDiffIndex = -1;
-      updateDiffNavigator();
-    }
-  }
-
-  function getDiffRows() {
-    return Array.from(diffContent.querySelectorAll('.diff-file-row'));
-  }
-
-  function getNavigableChanges() {
-    const rows = getDiffRows();
-    const targets = [];
-    rows.forEach((row) => {
-      const hunks = Array.from(row.querySelectorAll('.diff-hunk'));
-      if (hunks.length > 0) {
-        hunks.forEach((h) => targets.push(h));
-      } else {
-        targets.push(row);
-      }
-    });
-    return targets;
-  }
-
-  function updateDiffNavigator() {
-    const targets = getNavigableChanges();
-    const total = targets.length;
-    const hasTargets = total > 0;
-    if (!hasTargets) {
-      currentDiffIndex = -1;
-    } else if (currentDiffIndex < 0 || Number.isNaN(currentDiffIndex)) {
-      currentDiffIndex = 0;
-    } else if (currentDiffIndex >= total) {
-      currentDiffIndex = total - 1;
-    }
-
-    if (diffPosition) {
-      diffPosition.textContent = hasTargets ? `${currentDiffIndex + 1} / ${total}` : '0 / 0';
-    }
-    if (btnPrevChange) btnPrevChange.disabled = !hasTargets || currentDiffIndex <= 0;
-    if (btnNextChange) btnNextChange.disabled = !hasTargets || currentDiffIndex >= total - 1;
-  }
-
-  function focusDiffAt(index, scrollIntoView) {
-    const rows = getDiffRows();
-    const targets = getNavigableChanges();
-    if (targets.length === 0 || rows.length === 0) {
-      currentDiffIndex = -1;
-      updateDiffNavigator();
-      return;
-    }
-
-    const safeIndex = Math.max(0, Math.min(index, targets.length - 1));
-    currentDiffIndex = safeIndex;
-    rows.forEach((row) => row.classList.remove('diff-current'));
-    diffContent.querySelectorAll('.diff-hunk-current').forEach((h) => h.classList.remove('diff-hunk-current'));
-
-    const target = targets[safeIndex];
-    const row = target.classList.contains('diff-file-row') ? target : target.closest('.diff-file-row');
-    if (row) {
-      row.classList.add('diff-current');
-    }
-    const body = row.querySelector('.diff-file-body');
-    const arrow = row.querySelector('.diff-expand-arrow');
-    if (body && !body.classList.contains('open')) {
-      body.classList.add('open');
-      if (arrow) arrow.textContent = '▼';
-    }
-    if (target.classList.contains('diff-hunk')) {
-      target.classList.add('diff-hunk-current');
-    }
-
-    if (scrollIntoView) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-    updateDiffNavigator();
-  }
-
-  function moveDiffCursor(delta) {
-    if (currentDiffIndex < 0) return;
-    focusDiffAt(currentDiffIndex + delta, true);
-  }
-
   function clearDiffs() {
-    diffPanel.classList.add('hidden');
-    diffSummary.textContent = '';
-    diffContent.innerHTML = '';
-    pendingDiffData = null;
-    currentDiffIndex = -1;
-    updateDiffNavigator();
+    messagesDiv.querySelectorAll('.inline-changes-block').forEach((b) => b.remove());
   }
 
   function clearAll() {
@@ -378,6 +501,7 @@
     welcomeBridge.className = `conn-chip ${data.bridge ? 'ok' : ''}`;
     welcomeOllama.textContent = data.ollama ? 'Ollama ready' : 'Ollama offline';
     welcomeBridge.textContent = data.bridge ? 'Bridge connected' : 'Bridge disconnected';
+    if (data.bridge) dismissOnboarding();
     setTimeout(() => connectionInfo.classList.add('hidden'), 5000);
   }
 
@@ -431,10 +555,62 @@
   function sendTask() {
     const text = taskInput.value.trim();
     if (!text || isBusy) return;
+    lastUserTask = text;
     hideMentions();
     taskInput.value = '';
     autoResize();
-    vscode.postMessage({ type: 'sendTask', data: text });
+    const imgs = pendingImageAttachments.slice();
+    pendingImageAttachments = [];
+    renderImagePreviews();
+    vscode.postMessage({ type: 'sendTask', data: text, images: imgs.length ? imgs : undefined });
+  }
+
+  function renderImagePreviews() {
+    if (!imagePreviews) return;
+    imagePreviews.innerHTML = '';
+    if (pendingImageAttachments.length === 0) {
+      imagePreviews.classList.add('hidden');
+      return;
+    }
+    imagePreviews.classList.remove('hidden');
+    pendingImageAttachments.forEach((img) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'img-preview-wrap';
+      const thumb = document.createElement('img');
+      thumb.className = 'img-preview-thumb';
+      thumb.src = `data:${img.mimeType};base64,${img.base64}`;
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'img-preview-remove';
+      rm.textContent = '✕';
+      rm.addEventListener('click', () => {
+        pendingImageAttachments = pendingImageAttachments.filter((x) => x !== img);
+        renderImagePreviews();
+      });
+      wrap.appendChild(thumb);
+      wrap.appendChild(rm);
+      imagePreviews.appendChild(wrap);
+    });
+  }
+
+  function setActiveProvider(p) {
+    if (!providerPills) return;
+    providerPills.querySelectorAll('.provider-pill').forEach((el) => {
+      el.classList.toggle('active', el.getAttribute('data-provider') === p);
+    });
+  }
+
+  function fillSettingsForm(d) {
+    const el = (id) => document.getElementById(id);
+    if (el('set-aiProvider')) el('set-aiProvider').value = d.aiProvider || 'chatgpt';
+    if (el('set-ollamaUrl')) el('set-ollamaUrl').value = d.ollamaUrl || '';
+    if (el('set-ollamaModel')) el('set-ollamaModel').value = d.ollamaModel || '';
+    if (el('set-autoApplyChanges')) el('set-autoApplyChanges').checked = !!d.autoApplyChanges;
+    if (el('set-allowTerminalCommands')) el('set-allowTerminalCommands').checked = !!d.allowTerminalCommands;
+    if (el('set-skipOllamaIfFilesMentioned')) el('set-skipOllamaIfFilesMentioned').checked = d.skipOllamaIfFilesMentioned !== false;
+    if (el('set-responseTimeoutMinutes')) el('set-responseTimeoutMinutes').value = String(d.responseTimeoutMinutes ?? 5);
+    if (el('set-conversationContextTurns')) el('set-conversationContextTurns').value = String(d.conversationContextTurns ?? 5);
+    if (el('set-maxStoredSessions')) el('set-maxStoredSessions').value = String(d.maxStoredSessions ?? 50);
   }
 
   function getAtMentionContext() {
@@ -592,15 +768,6 @@
   }
 
   btnSend.addEventListener('click', sendTask);
-  btnApply.addEventListener('click', () => {
-    vscode.postMessage({ type: 'applyChanges' });
-    clearDiffs();
-  });
-  btnReject.addEventListener('click', () => {
-    vscode.postMessage({ type: 'rejectChanges' });
-  });
-  btnPrevChange.addEventListener('click', () => moveDiffCursor(-1));
-  btnNextChange.addEventListener('click', () => moveDiffCursor(1));
   btnCheckStatus.addEventListener('click', () => {
     vscode.postMessage({ type: 'checkStatus' });
   });
@@ -610,6 +777,84 @@
   btnSettings.addEventListener('click', () => {
     vscode.postMessage({ type: 'openSettings' });
   });
+  if (btnCloseSettings && settingsOverlay) {
+    btnCloseSettings.addEventListener('click', () => settingsOverlay.classList.add('hidden'));
+    settingsOverlay.addEventListener('click', (e) => {
+      if (e.target === settingsOverlay) settingsOverlay.classList.add('hidden');
+    });
+  }
+  if (btnSettingsSave) {
+    btnSettingsSave.addEventListener('click', () => {
+      const g = (id) => document.getElementById(id);
+      vscode.postMessage({
+        type: 'saveSettings',
+        data: {
+          aiProvider: g('set-aiProvider')?.value,
+          ollamaUrl: g('set-ollamaUrl')?.value,
+          ollamaModel: g('set-ollamaModel')?.value,
+          autoApplyChanges: g('set-autoApplyChanges')?.checked,
+          allowTerminalCommands: g('set-allowTerminalCommands')?.checked,
+          skipOllamaIfFilesMentioned: g('set-skipOllamaIfFilesMentioned')?.checked,
+          responseTimeoutMinutes: Number(g('set-responseTimeoutMinutes')?.value),
+          conversationContextTurns: Number(g('set-conversationContextTurns')?.value),
+          maxStoredSessions: Number(g('set-maxStoredSessions')?.value),
+        },
+      });
+    });
+  }
+  if (btnSettingsReset) {
+    btnSettingsReset.addEventListener('click', () => {
+      vscode.postMessage({
+        type: 'saveSettings',
+        data: {
+          aiProvider: 'chatgpt',
+          ollamaUrl: 'http://localhost:11434',
+          ollamaModel: 'qwen2.5-coder:7b',
+          autoApplyChanges: false,
+          allowTerminalCommands: false,
+          skipOllamaIfFilesMentioned: true,
+          responseTimeoutMinutes: 5,
+          conversationContextTurns: 5,
+          maxStoredSessions: 50,
+        },
+      });
+    });
+  }
+  if (providerPills) {
+    providerPills.querySelectorAll('.provider-pill').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const p = btn.getAttribute('data-provider');
+        vscode.postMessage({ type: 'selectProvider', data: p });
+      });
+    });
+  }
+
+  const inputAreaEl = document.getElementById('input-area');
+  if (inputAreaEl) {
+    inputAreaEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+    });
+    inputAreaEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const files = e.dataTransfer?.files;
+      if (!files?.length) return;
+      for (const f of Array.from(files)) {
+        if (!f.type.startsWith('image/')) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = String(reader.result || '');
+          const base64 = res.includes(',') ? res.split(',')[1] : res;
+          pendingImageAttachments.push({
+            base64,
+            mimeType: f.type || 'image/png',
+            name: f.name || 'image.png',
+          });
+          renderImagePreviews();
+        };
+        reader.readAsDataURL(f);
+      }
+    });
+  }
   btnAttach.addEventListener('click', () => {
     const pos = taskInput.selectionStart;
     taskInput.value = `${taskInput.value.slice(0, pos)}@${taskInput.value.slice(pos)}`;
@@ -677,19 +922,6 @@
     }
   });
 
-  window.addEventListener('keydown', (e) => {
-    if (diffPanel.classList.contains('hidden')) return;
-    const target = e.target;
-    if (target === taskInput) return;
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      moveDiffCursor(-1);
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      moveDiffCursor(1);
-    }
-  });
-
   taskInput.addEventListener('input', () => {
     autoResize();
     const ctx = getAtMentionContext();
@@ -727,8 +959,12 @@
         }
         break;
 
-      case 'showDiffs':
-        showDiffs(msg.data);
+      case 'showOnboarding':
+        showOnboarding();
+        break;
+
+      case 'attachDiffs':
+        attachDiffsToLastAgent(msg.data);
         break;
 
       case 'clearDiffs':
@@ -753,35 +989,16 @@
         break;
 
       case 'fileApplied': {
-        const row = diffContent.querySelector(`[data-path="${msg.data}"]`);
-        if (row) {
-          row.style.opacity = '0.45';
-          const actions = row.querySelector('.diff-per-file-actions');
-          if (actions) actions.innerHTML = '<span style="font-size:10px;color:#10b981">✓ Applied</span>';
+        const card = findInlineFileCard(msg.data);
+        if (card) {
+          card.classList.add('applied');
         }
-        updateDiffNavigator();
         break;
       }
 
       case 'fileSkipped': {
-        const row = diffContent.querySelector(`[data-path="${msg.data}"]`);
-        if (row) {
-          const targetsBefore = getNavigableChanges();
-          const removedTargetsCount = targetsBefore.filter((t) => {
-            const owner = t.classList.contains('diff-file-row') ? t : t.closest('.diff-file-row');
-            return owner === row;
-          }).length;
-          row.remove();
-          if (removedTargetsCount > 0 && currentDiffIndex >= 0) {
-            currentDiffIndex = Math.max(0, currentDiffIndex - removedTargetsCount);
-          }
-          const rowsAfter = getDiffRows();
-          if (rowsAfter.length > 0 && getNavigableChanges().length > 0) {
-            focusDiffAt(Math.max(currentDiffIndex, 0), true);
-          } else {
-            updateDiffNavigator();
-          }
-        }
+        const card = findInlineFileCard(msg.data);
+        if (card) card.classList.add('skipped');
         break;
       }
 
@@ -803,6 +1020,41 @@
         });
         break;
       }
+
+      case 'providerUpdate':
+        setActiveProvider(msg.data || 'chatgpt');
+        break;
+
+      case 'queueDepth': {
+        const n = Number(msg.data) || 0;
+        const lab = document.getElementById('btn-send-label');
+        if (lab) lab.textContent = n > 0 ? `Send (${n} queued)` : 'Send';
+        break;
+      }
+
+      case 'settingsSnapshot':
+        fillSettingsForm(msg.data || {});
+        break;
+
+      case 'openSettingsOverlay':
+        if (settingsOverlay) settingsOverlay.classList.remove('hidden');
+        break;
+
+      case 'settingsSaved':
+        if (settingsOverlay) settingsOverlay.classList.add('hidden');
+        break;
+
+      case 'hunkState':
+        break;
+    }
+  });
+
+  document.querySelector('.btn-onboarding-dismiss')?.addEventListener('click', dismissOnboarding);
+  document.querySelector('.onboarding-close')?.addEventListener('click', dismissOnboarding);
+  document.querySelector('.btn-onboarding-install')?.addEventListener('click', (e) => {
+    const url = e.currentTarget?.getAttribute?.('data-url');
+    if (url) {
+      vscode.postMessage({ type: 'openExternalUrl', data: url });
     }
   });
 
@@ -810,5 +1062,4 @@
   updateWelcomeVisibility();
   vscode.postMessage({ type: 'checkStatus' });
   vscode.postMessage({ type: 'getModel' });
-  updateDiffNavigator();
 })();

@@ -1,68 +1,11 @@
 (function () {
   'use strict';
 
-  const SELECTORS = {
-    textarea: [
-      '#prompt-textarea',
-      'div[contenteditable="true"][id="prompt-textarea"]',
-      'div[contenteditable="true"]',
-      'textarea[placeholder]',
-    ],
-    sendButton: [
-      'button[data-testid="send-button"]',
-      'button[aria-label="Send prompt"]',
-      'form button[type="submit"]',
-      'button.bottom-0',
-    ],
-    stopButton: [
-      'button[data-testid="stop-button"]',
-      'button[aria-label="Stop generating"]',
-      'button[aria-label="Stop streaming"]',
-    ],
-    newChatButton: [
-      'button[data-testid="create-new-chat-button"]',
-      'nav button[aria-label="New chat"]',
-      'a[data-testid="create-new-chat-button"]',
-      'button[aria-label="New conversation"]',
-      'nav a[data-testid="new-chat-button"]',
-      // a[href="/"] intentionally omitted — it matches the logo and navigates away from the page
-    ],
-    assistantMessage: [
-      'div[data-message-author-role="assistant"]',
-      'div.agent-turn',
-      'article[data-testid^="conversation-turn"]',
-    ],
-    messageContent: [
-      'div.markdown',
-      '.markdown-content',
-      '.message-content',
-    ],
-    rateLimitWarning: [
-      'div[class*="rate-limit"]',
-      'div:has(> p:contains("rate limit"))',
-      '.error-message',
-    ],
-    fileInput: [
-      'input[type="file"]',
-      'input[accept]',
-    ],
-    fileUploadButton: [
-      'button[aria-label="Attach files"]',
-      'button[aria-label="Upload files"]',
-      'button[aria-label="Add attachment"]',
-      'button[data-testid="composer-speech-button"]',
-      'label[for*="file"]',
-      'button[aria-label*="attach" i]',
-      'button[aria-label*="file" i]',
-      'button[aria-label*="upload" i]',
-    ],
-    uploadedFileChip: [
-      'div[class*="file-chip"]',
-      'div[class*="attachment"]',
-      'div[class*="FileChip"]',
-      '[data-testid*="file"]',
-      'div[class*="upload"]',
-    ],
+  /** Last selector verification (YYYY-MM-DD) — UIs drift; update when re-tested. */
+  const SELECTOR_DATES = {
+    chatgpt: '2026-04-13',
+    gemini: '2026-04-13',
+    claude: '2026-04-13',
   };
 
   const POLL_INTERVAL = 500;
@@ -75,7 +18,7 @@
         const el = document.querySelector(selector);
         if (el) return el;
       } catch {
-        // invalid selector, try next
+        // invalid selector
       }
     }
     return null;
@@ -87,7 +30,7 @@
         const els = document.querySelectorAll(selector);
         if (els.length > 0) return Array.from(els);
       } catch {
-        // invalid selector, try next
+        // invalid selector
       }
     }
     return [];
@@ -97,6 +40,280 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function splitIntoChunks(text, chunkSize) {
+    const chunks = [];
+    for (let i = 0; i < text.length; i += chunkSize) {
+      chunks.push(text.substring(i, i + chunkSize));
+    }
+    return chunks;
+  }
+
+  function getActiveProvider(providerKey) {
+    if (providerKey && PROVIDERS[providerKey]) return PROVIDERS[providerKey];
+    const host = window.location.hostname;
+    for (const [, p] of Object.entries(PROVIDERS)) {
+      if (p.hostMatch.some((h) => host.includes(h))) return p;
+    }
+    return PROVIDERS.chatgpt;
+  }
+
+  async function setInputWithInputEvent(input, text) {
+    input.focus();
+    await sleep(150);
+    if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+      const nativeInputValueSetter =
+        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set ||
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(input, text);
+      } else {
+        input.value = text;
+      }
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: text }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (input.getAttribute('contenteditable') === 'true') {
+      if (typeof input.innerText === 'string') {
+        input.innerText = text;
+      } else {
+        input.textContent = text;
+      }
+      input.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          data: text,
+          inputType: 'insertText',
+        })
+      );
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    await sleep(200);
+  }
+
+  async function setInputContentEditableFallback(input, text) {
+    input.focus();
+    await sleep(200);
+    input.textContent = '';
+    const chunks = splitIntoChunks(text, 5000);
+    for (const chunk of chunks) {
+      try {
+        document.execCommand('insertText', false, chunk);
+      } catch {
+        input.textContent += chunk;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      await sleep(40);
+    }
+    await sleep(200);
+  }
+
+  const PROVIDERS = {
+    chatgpt: {
+      key: 'chatgpt',
+      hostMatch: ['chatgpt.com', 'chat.openai.com'],
+      selectors: {
+        textarea: [
+          '#prompt-textarea',
+          'div[contenteditable="true"][id="prompt-textarea"]',
+          'div[contenteditable="true"]',
+          'textarea[placeholder]',
+        ],
+        sendButton: [
+          'button[data-testid="send-button"]',
+          'button[aria-label="Send prompt"]',
+          'form button[type="submit"]',
+        ],
+        stopButton: [
+          'button[data-testid="stop-button"]',
+          'button[aria-label="Stop generating"]',
+          'button[aria-label="Stop streaming"]',
+        ],
+        newChatButton: [
+          'button[data-testid="create-new-chat-button"]',
+          'nav button[aria-label="New chat"]',
+          'a[data-testid="create-new-chat-button"]',
+          'button[aria-label="New conversation"]',
+        ],
+        assistantMessage: [
+          'div[data-message-author-role="assistant"]',
+          'div.agent-turn',
+          'article[data-testid^="conversation-turn"]',
+        ],
+        messageContent: ['div.markdown', '.markdown-content', '.message-content'],
+        fileInput: ['input[type="file"]', 'input[accept]'],
+        fileUploadButton: [
+          'button[aria-label="Attach files"]',
+          'button[aria-label="Upload files"]',
+          'button[aria-label*="attach" i]',
+          'button[aria-label*="file" i]',
+        ],
+        uploadedFileChip: [
+          'div[class*="file-chip"]',
+          'div[class*="attachment"]',
+          '[data-testid*="file"]',
+        ],
+      },
+      supportsFileUpload: true,
+      getResponse() {
+        const messages = findAllElements(PROVIDERS.chatgpt.selectors.assistantMessage);
+        if (messages.length === 0) return null;
+        const lastMsg = messages[messages.length - 1];
+        const contentEl =
+          lastMsg.querySelector('div.markdown') ||
+          lastMsg.querySelector('.markdown-content') ||
+          lastMsg.querySelector('[class*="prose"]') ||
+          lastMsg;
+        if (typeof contentEl.innerText === 'string' && contentEl.innerText.length > 0) {
+          return contentEl.innerText;
+        }
+        return null;
+      },
+      async setInput(text) {
+        const input = findElement(PROVIDERS.chatgpt.selectors.textarea);
+        if (!input) throw new Error('ChatGPT input not found');
+        try {
+          await setInputWithInputEvent(input, text);
+        } catch {
+          await setInputContentEditableFallback(input, text);
+        }
+      },
+    },
+
+    gemini: {
+      key: 'gemini',
+      hostMatch: ['gemini.google.com'],
+      selectors: {
+        textarea: [
+          'div.ql-editor[contenteditable="true"]',
+          'rich-textarea div[contenteditable="true"]',
+          'textarea',
+          'div[contenteditable="true"]',
+        ],
+        sendButton: [
+          'button[aria-label="Send message"]',
+          'button.send-button',
+          'button[data-test-id="send-button"]',
+          'button[type="submit"]',
+        ],
+        stopButton: [
+          'button[aria-label="Stop response"]',
+          'button[aria-label="Cancel"]',
+          'button[aria-label*="Stop" i]',
+        ],
+        newChatButton: [
+          'a[href="/app"]',
+          'button[aria-label="New chat"]',
+          'button[aria-label*="New chat" i]',
+        ],
+        assistantMessage: [
+          'model-response',
+          'div[data-response-index]',
+          '.model-response-text',
+        ],
+        messageContent: ['div.markdown', '.response-content', 'model-response', 'p'],
+        fileInput: ['input[type="file"]'],
+        fileUploadButton: ['button[aria-label="Upload file"]', 'button[aria-label*="file" i]'],
+        uploadedFileChip: [
+          '[class*="file-pill"]',
+          '[class*="FilePill"]',
+          '[data-chip-type="file"]',
+          'button[aria-label*="Remove file" i]',
+        ],
+      },
+      supportsFileUpload: true,
+      getResponse() {
+        const all = document.querySelectorAll(
+          'model-response .markdown, model-response, .response-content'
+        );
+        if (all.length > 0) return all[all.length - 1].innerText;
+        const msgs = findAllElements(PROVIDERS.gemini.selectors.assistantMessage);
+        if (msgs.length > 0) return msgs[msgs.length - 1].innerText;
+        return null;
+      },
+      async setInput(text) {
+        const input =
+          document.querySelector('div.ql-editor[contenteditable="true"]') ||
+          document.querySelector('rich-textarea div[contenteditable="true"]') ||
+          findElement(PROVIDERS.gemini.selectors.textarea);
+        if (!input) throw new Error('Gemini input not found');
+        await setInputWithInputEvent(input, text);
+      },
+    },
+
+    claude: {
+      key: 'claude',
+      hostMatch: ['claude.ai'],
+      selectors: {
+        textarea: [
+          'div[contenteditable="true"].ProseMirror',
+          'div[contenteditable="true"]',
+          'textarea',
+        ],
+        sendButton: [
+          'button[aria-label="Send Message"]',
+          'button[data-testid="send-button"]',
+          'button[type="submit"]',
+        ],
+        stopButton: [
+          'button[aria-label="Stop Response"]',
+          'button[data-testid="stop-button"]',
+          'button[aria-label*="Stop" i]',
+        ],
+        newChatButton: [
+          'a[href="/new"]',
+          'button[aria-label="New conversation"]',
+          'button[aria-label*="New chat" i]',
+        ],
+        assistantMessage: [
+          'div[data-is-streaming]',
+          '.font-claude-message',
+          'div[class*="prose"]',
+        ],
+        messageContent: ['div[class*="prose"]', '.font-claude-message p', 'p'],
+        fileInput: ['input[type="file"]'],
+        fileUploadButton: ['button[aria-label="Attach files"]', 'button[aria-label*="file" i]'],
+        uploadedFileChip: [
+          '[class*="attachment-preview"]',
+          '[data-testid="attachment"]',
+          'button[aria-label*="Remove" i]',
+          '[class*="file-preview"]',
+        ],
+      },
+      supportsFileUpload: true,
+      getResponse() {
+        const all = document.querySelectorAll(
+          'div[data-is-streaming="false"] .font-claude-message, .font-claude-message'
+        );
+        if (all.length > 0) return all[all.length - 1].innerText;
+        const prose = document.querySelectorAll('div[class*="prose"]');
+        if (prose.length > 0) return prose[prose.length - 1].innerText;
+        return null;
+      },
+      async setInput(text) {
+        const input =
+          document.querySelector('div[contenteditable="true"].ProseMirror') ||
+          findElement(PROVIDERS.claude.selectors.textarea);
+        if (!input) throw new Error('Claude input not found');
+        input.focus();
+        await sleep(150);
+        input.innerText = '';
+        input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        await sleep(80);
+        const chunks = splitIntoChunks(text, 3000);
+        for (const chunk of chunks) {
+          input.innerText += chunk;
+          input.dispatchEvent(
+            new InputEvent('input', { bubbles: true, data: chunk, inputType: 'insertText' })
+          );
+          await sleep(40);
+        }
+        await sleep(150);
+      },
+    },
+  };
+
+  void SELECTOR_DATES;
+
   function checkForRateLimit() {
     const body = document.body.innerText.toLowerCase();
     if (
@@ -105,21 +322,19 @@
       body.includes('too many requests') ||
       body.includes('please try again later')
     ) {
-      const el = findElement(SELECTORS.rateLimitWarning);
-      if (el) return true;
-      if (body.includes("you've reached")) return true;
+      return true;
     }
     return false;
   }
 
-  function hasExistingConversation() {
-    const msgs = findAllElements(SELECTORS.assistantMessage);
+  function hasExistingConversation(adapter) {
+    const msgs = findAllElements(adapter.selectors.assistantMessage);
     return msgs.length > 0;
   }
 
-  async function startNewChat() {
+  async function startNewChat(adapter) {
     try {
-      const newChatBtn = findElement(SELECTORS.newChatButton);
+      const newChatBtn = findElement(adapter.selectors.newChatButton);
       if (newChatBtn) {
         newChatBtn.click();
         await sleep(2000);
@@ -131,340 +346,85 @@
     }
   }
 
-  async function setInputText(text) {
-    try {
-      const input = findElement(SELECTORS.textarea);
-      if (!input) {
-        throw new Error('Could not find ChatGPT input field');
-      }
-
-      input.focus();
-      await sleep(200);
-
-      if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-        const nativeInputValueSetter =
-          Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set ||
-          Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-
-        if (nativeInputValueSetter) {
-          nativeInputValueSetter.call(input, text);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-          input.value = text;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      } else if (input.getAttribute('contenteditable') === 'true') {
-        input.focus();
-        input.textContent = '';
-
-        const chunks = splitIntoChunks(text, 5000);
-        for (const chunk of chunks) {
-          document.execCommand('insertText', false, chunk);
-          await sleep(50);
-        }
-
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-
-      await sleep(300);
-    } catch (err) {
-      throw new Error(`Failed to set prompt text: ${err.message || String(err)}`);
+  async function clickSend(adapter) {
+    await sleep(400);
+    const sendBtn = findElement(adapter.selectors.sendButton);
+    if (sendBtn) {
+      sendBtn.click();
+      return true;
     }
-  }
-
-  function splitIntoChunks(text, chunkSize) {
-    const chunks = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-      chunks.push(text.substring(i, i + chunkSize));
-    }
-    return chunks;
-  }
-
-  async function clickSend() {
-    try {
-      await sleep(500);
-
-      const sendBtn = findElement(SELECTORS.sendButton);
-      if (sendBtn) {
-        sendBtn.click();
-        return true;
-      }
-
-      const input = findElement(SELECTORS.textarea);
-      if (input) {
-        const enterEvent = new KeyboardEvent('keydown', {
+    const input = findElement(adapter.selectors.textarea);
+    if (input) {
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
           key: 'Enter',
           code: 'Enter',
           keyCode: 13,
           which: 13,
           bubbles: true,
-        });
-        input.dispatchEvent(enterEvent);
-        return true;
+        })
+      );
+      return true;
+    }
+    throw new Error('Could not find send control');
+  }
+
+  function isStreaming(adapter) {
+    return findElement(adapter.selectors.stopButton) !== null;
+  }
+
+  async function waitForResponse(adapter, previousMessageCount) {
+    const startTime = Date.now();
+    let lastContent = '';
+    let lastContentTime = Date.now();
+    let responseStarted = false;
+
+    while (Date.now() - startTime < MAX_WAIT) {
+      if (checkForRateLimit()) {
+        throw new Error('AI provider rate limited, try again later');
       }
 
-      throw new Error('Could not find send button or trigger Enter');
-    } catch (err) {
-      throw new Error(`Failed to send prompt: ${err.message || String(err)}`);
-    }
-  }
+      const currentMessages = findAllElements(adapter.selectors.assistantMessage);
 
-  // Bug fix: textContent strips whitespace from <pre> blocks, collapsing code onto one line.
-  // innerText respects CSS white-space:pre so newlines inside code blocks are preserved.
-  function getLastAssistantMessage() {
-    const messages = findAllElements(SELECTORS.assistantMessage);
-    if (messages.length === 0) return null;
-    const lastMsg = messages[messages.length - 1];
-
-    const contentEl =
-      lastMsg.querySelector('div.markdown') ||
-      lastMsg.querySelector('.markdown-content') ||
-      lastMsg.querySelector('[class*="prose"]') ||
-      lastMsg;
-
-    if (typeof contentEl.innerText === 'string' && contentEl.innerText.length > 0) {
-      return contentEl.innerText;
-    }
-
-    return reconstructTextWithNewlines(contentEl);
-  }
-
-  // Fallback for environments where innerText is unavailable: manually walk the DOM
-  // and insert \n at block boundaries and preserve <pre> content verbatim.
-  function reconstructTextWithNewlines(container) {
-    let result = '';
-    function walk(node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        result += node.textContent;
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        const tag = node.tagName.toLowerCase();
-        if (tag === 'br') {
-          result += '\n';
-        } else if (tag === 'pre') {
-          result += '\n' + node.innerText + '\n';
-          return;
-        } else if (['p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) {
-          node.childNodes.forEach(walk);
-          result += '\n';
-        } else {
-          node.childNodes.forEach(walk);
-        }
+      if (currentMessages.length > previousMessageCount) {
+        responseStarted = true;
       }
-    }
-    container.childNodes.forEach(walk);
-    return result.trim();
-  }
 
-  function isStreaming() {
-    return findElement(SELECTORS.stopButton) !== null;
-  }
-
-  async function waitForResponse(previousMessageCount) {
-    try {
-      const startTime = Date.now();
-      let lastContent = '';
-      let lastContentTime = Date.now();
-      let responseStarted = false;
-
-      while (Date.now() - startTime < MAX_WAIT) {
-        if (checkForRateLimit()) {
-          throw new Error('ChatGPT rate limited, try again later');
-        }
-
-        const currentMessages = findAllElements(SELECTORS.assistantMessage);
-
-        if (currentMessages.length > previousMessageCount) {
+      if (!responseStarted) {
+        const currentContentProbe = adapter.getResponse() || '';
+        if (currentContentProbe.length > 50 && currentContentProbe !== lastContent) {
           responseStarted = true;
         }
+      }
 
-        if (responseStarted) {
-          const streaming = isStreaming();
-          const currentContent = getLastAssistantMessage() || '';
+      if (responseStarted) {
+        const streaming = isStreaming(adapter);
+        const currentContent = adapter.getResponse() || '';
 
-          if (currentContent !== lastContent) {
-            lastContent = currentContent;
-            lastContentTime = Date.now();
-          }
-
-          const contentStable = Date.now() - lastContentTime > STABLE_THRESHOLD;
-          const notStreaming = !streaming;
-
-          if (contentStable && notStreaming && currentContent.length > 0) {
-            return currentContent;
-          }
+        if (currentContent !== lastContent) {
+          lastContent = currentContent;
+          lastContentTime = Date.now();
         }
 
-        await sleep(POLL_INTERVAL);
+        const contentStable = Date.now() - lastContentTime > STABLE_THRESHOLD;
+        const notStreaming = !streaming;
+
+        if (contentStable && notStreaming && currentContent.length > 0) {
+          return currentContent;
+        }
       }
 
-      if (lastContent.length > 0) {
-        return lastContent;
-      }
-
-      throw new Error('Timed out waiting for ChatGPT response');
-    } catch (err) {
-      throw new Error(`Failed while waiting for ChatGPT response: ${err.message || String(err)}`);
+      await sleep(POLL_INTERVAL);
     }
+
+    if (lastContent.length > 0) return lastContent;
+    throw new Error('Timed out waiting for AI response');
   }
 
-  // Upload real files to ChatGPT using the hidden file input.
-  // files: array of {name, base64, mimeType, sizeBytes}
-  // Returns: number of files successfully uploaded
-  async function uploadFilesToChatGPT(files) {
-    if (!files || files.length === 0) return 0;
-
-    console.log('[Local tab bridge content] Uploading', files.length, 'file(s) to ChatGPT...');
-
-    // Strategy 1: Try to find the hidden file input directly and inject via DataTransfer
-    // This is the most reliable approach and doesn't require clicking buttons
-    let fileInput = findElement(SELECTORS.fileInput);
-
-    // Strategy 2: If no file input visible, click the attach button to reveal it
-    if (!fileInput) {
-      console.log('[Local tab bridge content] No file input found directly, trying attach button...');
-      const attachBtn = findElement(SELECTORS.fileUploadButton);
-      if (attachBtn) {
-        attachBtn.click();
-        await sleep(800);
-        fileInput = findElement(SELECTORS.fileInput);
-      }
-    }
-
-    if (!fileInput) {
-      // Strategy 3: Search inside shadow roots and iframes
-      fileInput = findFileInputInShadowRoots();
-    }
-
-    if (!fileInput) {
-      throw new Error(
-        'Could not find ChatGPT file upload input. ' +
-          'Make sure you are on chatgpt.com and the upload feature is available.'
-      );
-    }
-
-    // Build File objects from base64 data using DataTransfer
-    const dataTransfer = new DataTransfer();
-
-    for (const fileData of files) {
-      try {
-        // Decode base64 to binary
-        const byteString = atob(fileData.base64);
-        const bytes = new Uint8Array(byteString.length);
-        for (let i = 0; i < byteString.length; i++) {
-          bytes[i] = byteString.charCodeAt(i);
-        }
-
-        const blob = new Blob([bytes], { type: fileData.mimeType || 'text/plain' });
-        const file = new File([blob], fileData.name, {
-          type: fileData.mimeType || 'text/plain',
-          lastModified: Date.now(),
-        });
-
-        dataTransfer.items.add(file);
-        console.log(
-          '[Local tab bridge content] Prepared file:',
-          fileData.name,
-          '(',
-          (fileData.sizeBytes / 1024).toFixed(1),
-          'KB)'
-        );
-      } catch (err) {
-        console.error('[Local tab bridge content] Failed to prepare file', fileData.name, ':', err);
-      }
-    }
-
-    if (dataTransfer.files.length === 0) {
-      throw new Error('Failed to prepare any files for upload');
-    }
-
-    // Inject files into the file input and trigger React's synthetic event system.
-    //
-    // PROBLEM: ChatGPT's file input is a React controlled component.
-    // Dispatching a plain native Event('change') does NOT trigger React's
-    // onChange because React 17+ attaches its synthetic event listeners at the
-    // root container, not on individual elements. Dispatching a native event
-    // passes through the DOM but React's fiber scheduler never sees it.
-    //
-    // SOLUTION: Use the native input value setter from the HTMLInputElement
-    // prototype (the same trick used for text inputs) to make React think the
-    // value was changed by the user, then dispatch a properly bubbling event.
-    // As a second layer, walk the React fiber to call the onChange prop directly.
-
-    // Step 1: Assign files via DataTransfer (standard approach)
-    try {
-      Object.defineProperty(fileInput, 'files', {
-        value: dataTransfer.files,
-        writable: false,
-        configurable: true,
-      });
-    } catch {
-      fileInput.files = dataTransfer.files;
-    }
-
-    // Step 2: Dispatch native change event with bubbles so React's root listener catches it
-    const nativeChangeEvent = new Event('change', { bubbles: true, cancelable: true });
-    fileInput.dispatchEvent(nativeChangeEvent);
-
-    // Step 3: Try to invoke React's internal onChange handler directly via fiber
-    // React stores the fiber on the DOM node under a key like "__reactFiber$xxxx"
-    try {
-      const fiberKey = Object.keys(fileInput).find(
-        (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-      );
-      if (fiberKey) {
-        let fiber = fileInput[fiberKey];
-        // Walk up to find the fiber that has an onChange prop
-        while (fiber) {
-          const onChange = fiber.pendingProps?.onChange || fiber.memoizedProps?.onChange;
-          if (typeof onChange === 'function') {
-            onChange({ target: fileInput, currentTarget: fileInput, bubbles: true });
-            console.log('[Local tab bridge content] Triggered React onChange via fiber');
-            break;
-          }
-          fiber = fiber.return;
-        }
-      }
-    } catch (reactErr) {
-      console.warn('[Local tab bridge content] React fiber trigger failed (non-fatal):', reactErr);
-    }
-
-    // Step 4: Also try via event props key (__reactEventHandlers$xxx)
-    try {
-      const propsKey = Object.keys(fileInput).find(
-        (k) => k.startsWith('__reactEventHandlers') || k.startsWith('__reactProps')
-      );
-      if (propsKey) {
-        const props = fileInput[propsKey];
-        if (typeof props?.onChange === 'function') {
-          props.onChange({ target: fileInput, currentTarget: fileInput, bubbles: true });
-          console.log('[Local tab bridge content] Triggered React onChange via props key');
-        }
-      }
-    } catch (propsErr) {
-      console.warn('[Local tab bridge content] Props key trigger failed (non-fatal):', propsErr);
-    }
-
-    console.log(
-      '[Local tab bridge content] File injection complete for',
-      dataTransfer.files.length,
-      'file(s)'
-    );
-
-    // Wait for ChatGPT to process the uploads (watch for file chips to appear)
-    const uploadedCount = await waitForFileChips(dataTransfer.files.length);
-
-    console.log('[Local tab bridge content] Confirmed', uploadedCount, 'file chip(s) appeared');
-    return uploadedCount;
-  }
-
-  // Search for file inputs inside Shadow DOM roots
-  // ChatGPT sometimes places inputs in shadow roots
   function findFileInputInShadowRoots() {
     function searchShadow(root) {
       const input = root.querySelector('input[type="file"], input[accept]');
       if (input) return input;
-
       for (const el of root.querySelectorAll('*')) {
         if (el.shadowRoot) {
           const found = searchShadow(el.shadowRoot);
@@ -476,130 +436,235 @@
     return searchShadow(document);
   }
 
-  // Wait until file upload chips appear in the ChatGPT UI.
-  // This confirms ChatGPT has received and is processing the files.
-  async function waitForFileChips(expectedCount) {
-    const startTime = Date.now();
-    const timeout = 30 * 1000; // 30 seconds to upload
+  async function waitForUploadIndicator(adapter, timeoutMs) {
+    const start = Date.now();
+    const chipSelectors = adapter.selectors.uploadedFileChip || [];
+    const uploadSelectors = [
+      ...chipSelectors,
+      '[data-testid*="file"]',
+      '[class*="file-chip"]',
+      '[class*="FileChip"]',
+      '[class*="attachment"]',
+      '[class*="upload"]',
+      'button[aria-label*="Remove file" i]',
+      'button[aria-label*="remove attachment" i]',
+      '[class*="file-pill"]',
+      '[class*="FilePill"]',
+      '[class*="attachment-preview"]',
+      '[data-testid="attachment"]',
+    ];
 
-    while (Date.now() - startTime < timeout) {
-      const chips = findAllElements(SELECTORS.uploadedFileChip);
+    while (Date.now() - start < timeoutMs) {
+      for (const sel of uploadSelectors) {
+        try {
+          if (sel && document.querySelector(sel)) return true;
+        } catch {
+          /* invalid selector */
+        }
+      }
+      await sleep(400);
+    }
+    return false;
+  }
 
-      // Also check for any element that looks like a file attachment indicator
-      const anyUploadIndicator = document.querySelector(
-        '[class*="file"][class*="upload"], [class*="attachment"], [class*="FileChip"], [data-testid*="file-chip"]'
+  async function uploadFiles(adapter, files) {
+    if (!files || files.length === 0) return 0;
+
+    const dataTransfer = new DataTransfer();
+    let preparedCount = 0;
+    for (const fileData of files) {
+      try {
+        const byteString = atob(fileData.base64);
+        const bytes = new Uint8Array(byteString.length);
+        for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i);
+        const blob = new Blob([bytes], { type: fileData.mimeType || 'text/plain' });
+        const file = new File([blob], fileData.name, {
+          type: fileData.mimeType || 'text/plain',
+          lastModified: Date.now(),
+        });
+        dataTransfer.items.add(file);
+        preparedCount++;
+      } catch (err) {
+        console.error('[Tab bridge] Failed to prepare file:', fileData.name, err);
+      }
+    }
+    if (preparedCount === 0) throw new Error('Failed to prepare any files');
+
+    const dropTargets = [
+      document.querySelector('form'),
+      findElement(adapter.selectors.textarea)?.closest('form'),
+      findElement(adapter.selectors.textarea)?.closest('[role="presentation"]'),
+      findElement(adapter.selectors.textarea),
+      document.body,
+    ].filter(Boolean);
+
+    const dropTarget = dropTargets[0];
+    if (dropTarget) {
+      dropTarget.dispatchEvent(
+        new DragEvent('dragenter', {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        })
       );
+      await sleep(120);
+      dropTarget.dispatchEvent(
+        new DragEvent('dragover', {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        })
+      );
+      await sleep(120);
+      dropTarget.dispatchEvent(
+        new DragEvent('drop', {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        })
+      );
+      await sleep(1500);
 
-      if (chips.length >= expectedCount || anyUploadIndicator) {
-        return chips.length || 1;
+      const uploaded = await waitForUploadIndicator(adapter, 8000);
+      if (uploaded) {
+        console.log('[Tab bridge] Files uploaded via drag-drop, count:', preparedCount);
+        return preparedCount;
       }
-
-      // Check for upload error
-      const errorEl = document.querySelector('[class*="upload-error"], [class*="error"][class*="file"]');
-      if (errorEl) {
-        throw new Error(`ChatGPT file upload error: ${errorEl.textContent?.trim() || 'unknown error'}`);
-      }
-
-      await sleep(500);
     }
 
-    // Timeout — some files may still have uploaded, continue with prompt anyway
-    console.warn('[Local tab bridge content] Timed out waiting for file chips — proceeding anyway');
+    const attachBtn = findElement(adapter.selectors.fileUploadButton);
+    if (attachBtn) {
+      attachBtn.click();
+      await sleep(1000);
+    }
+
+    let fileInput = findElement(adapter.selectors.fileInput) || findFileInputInShadowRoots();
+
+    if (fileInput) {
+      try {
+        Object.defineProperty(fileInput, 'files', {
+          value: dataTransfer.files,
+          writable: true,
+          configurable: true,
+        });
+      } catch {
+        /* ignore */
+      }
+
+      ['change', 'input'].forEach((evtName) => {
+        fileInput.dispatchEvent(new Event(evtName, { bubbles: true, cancelable: true }));
+      });
+
+      try {
+        const reactKey = Object.keys(fileInput).find(
+          (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+        );
+        if (reactKey) {
+          let fiber = fileInput[reactKey];
+          while (fiber) {
+            const onChange = fiber.pendingProps?.onChange || fiber.memoizedProps?.onChange;
+            if (typeof onChange === 'function') {
+              onChange({ target: fileInput, currentTarget: fileInput, bubbles: true });
+              break;
+            }
+            fiber = fiber.return;
+          }
+        }
+      } catch {
+        /* non-fatal */
+      }
+
+      await sleep(1500);
+      const uploaded2 = await waitForUploadIndicator(adapter, 8000);
+      if (uploaded2) {
+        console.log('[Tab bridge] Files uploaded via file input, count:', preparedCount);
+        return preparedCount;
+      }
+    }
+
+    console.warn(
+      '[Tab bridge] File upload strategies exhausted — files will be inlined in prompt text instead'
+    );
     return 0;
   }
 
-  // Results are pushed to background.js via chrome.runtime.sendMessage instead of
-  // using the sendResponse callback, which Chrome silently drops for long operations.
-  async function handleSendPrompt(promptText) {
+  async function handleSendPrompt(promptText, providerKey) {
+    const adapter = getActiveProvider(providerKey);
     try {
-      if (hasExistingConversation()) {
-        await startNewChat();
+      if (hasExistingConversation(adapter)) {
+        await startNewChat(adapter);
+        await sleep(500);
       }
-
-      const beforeCount = findAllElements(SELECTORS.assistantMessage).length;
-      await setInputText(promptText);
-      await clickSend();
-      await sleep(1000);
-
-      const responseText = await waitForResponse(beforeCount);
+      const beforeCount = findAllElements(adapter.selectors.assistantMessage).length;
+      await adapter.setInput(promptText);
+      await clickSend(adapter);
+      await sleep(800);
+      const responseText = await waitForResponse(adapter, beforeCount);
       chrome.runtime.sendMessage({ type: 'CHATGPT_RESPONSE', payload: responseText });
     } catch (err) {
       console.error('[Local tab bridge content] Error:', err);
       chrome.runtime.sendMessage({
         type: 'CHATGPT_ERROR',
-        payload: err.message || 'Unknown error in content script'
+        payload: err.message || 'Unknown error in content script',
       });
     }
   }
 
-  // Handle SEND_PROMPT_WITH_FILES: upload actual files then send the prompt text.
-  async function handleSendPromptWithFiles(promptText, files) {
+  async function handleSendPromptWithFiles(promptText, files, providerKey) {
+    const adapter = getActiveProvider(providerKey);
     try {
-      // Start fresh if there's an existing conversation
-      if (hasExistingConversation()) {
-        await startNewChat();
-        await sleep(1000);
+      if (hasExistingConversation(adapter)) {
+        await startNewChat(adapter);
+        await sleep(1200);
       }
 
-      // Upload files BEFORE setting the prompt text
-      // ChatGPT requires files to be attached before the message is sent
       let uploadedCount = 0;
       if (files && files.length > 0) {
-        console.log('[Local tab bridge content] Starting file upload phase...');
         try {
-          uploadedCount = await uploadFilesToChatGPT(files);
-          console.log('[Local tab bridge content] Upload phase complete:', uploadedCount, 'file(s)');
-          // Give ChatGPT a moment to register the uploads before we type the prompt
-          await sleep(1500);
+          uploadedCount = await uploadFiles(adapter, files);
+          if (uploadedCount > 0) {
+            await sleep(1500);
+          } else {
+            console.log('[Tab bridge] File upload failed — using inline prompt mode (files are in prompt text)');
+          }
         } catch (uploadErr) {
-          // Upload failed — fall back to sending prompt text only
-          console.error('[Local tab bridge content] File upload failed:', uploadErr.message);
-          console.log('[Local tab bridge content] Falling back to text-only mode...');
-          // Don't throw — try to continue with just the prompt text
+          console.error('[Tab bridge] Upload failed, falling back to inline mode:', uploadErr);
         }
       }
 
-      // Now set the prompt text and send
-      const beforeCount = findAllElements(SELECTORS.assistantMessage).length;
-      await setInputText(promptText);
-      await clickSend();
-      await sleep(1000);
-
-      const responseText = await waitForResponse(beforeCount);
-
-      chrome.runtime.sendMessage({
-        type: 'CHATGPT_RESPONSE',
-        payload: responseText,
-      });
+      const beforeCount = findAllElements(adapter.selectors.assistantMessage).length;
+      await adapter.setInput(promptText);
+      await sleep(400);
+      await clickSend(adapter);
+      await sleep(800);
+      const responseText = await waitForResponse(adapter, beforeCount);
+      chrome.runtime.sendMessage({ type: 'CHATGPT_RESPONSE', payload: responseText });
     } catch (err) {
-      console.error('[Local tab bridge content] Error in handleSendPromptWithFiles:', err);
+      console.error('[Tab bridge] Error (files):', err);
       chrome.runtime.sendMessage({
         type: 'CHATGPT_ERROR',
-        payload: err.message || 'Unknown error in content script (file upload mode)',
+        payload: err.message || 'Unknown error in content script (file mode)',
       });
     }
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'PING') {
       sendResponse({ type: 'PONG' });
       return false;
     }
-
     if (message.type === 'SEND_PROMPT') {
       sendResponse({ type: 'ACK' });
-      handleSendPrompt(message.payload);
+      handleSendPrompt(message.payload, message.provider);
       return false;
     }
-
     if (message.type === 'SEND_PROMPT_WITH_FILES') {
       sendResponse({ type: 'ACK' });
-      handleSendPromptWithFiles(message.payload, message.files || []);
+      handleSendPromptWithFiles(message.payload, message.files || [], message.provider);
       return false;
     }
-
     return false;
   });
 
-  console.log('[Local tab bridge content] Content script loaded on', window.location.href);
+  console.log('[Local tab bridge content] Loaded on', window.location.href, SELECTOR_DATES);
 })();
